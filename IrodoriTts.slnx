@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/IrodoriTts.Cli/IrodoriTts.Cli.csproj" />
+    <Project Path="src/IrodoriTts.Onnx/IrodoriTts.Onnx.csproj" />
+    <Project Path="src/IrodoriTts.Server/IrodoriTts.Server.csproj" />
+    <Project Path="src/IrodoriTts/IrodoriTts.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/IrodoriTts.Server.Tests/IrodoriTts.Server.Tests.csproj" />
+    <Project Path="tests/IrodoriTts.Tests/IrodoriTts.Tests.csproj" />
+  </Folder>
+</Solution>

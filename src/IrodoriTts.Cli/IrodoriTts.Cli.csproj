@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>irodori-tts</AssemblyName>
+    <RootNamespace>IrodoriTts.Cli</RootNamespace>
+    <!-- Native libtorch backend: cpu (default) or cuda. Build with -p:TorchBackend=cuda for NVIDIA GPUs. -->
+    <TorchBackend Condition="'$(TorchBackend)' == ''">cpu</TorchBackend>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\IrodoriTts\IrodoriTts.csproj" />
+    <ProjectReference Include="..\IrodoriTts.Onnx\IrodoriTts.Onnx.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Shared\TtsBackend.cs" Link="Shared\TtsBackend.cs" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TorchBackend)' == 'cpu'">
+    <PackageReference Include="TorchSharp-cpu" Version="0.107.0" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(TorchBackend)' == 'cuda' And $([MSBuild]::IsOSPlatform('Windows'))">
+    <PackageReference Include="TorchSharp-cuda-windows" Version="0.107.0" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(TorchBackend)' == 'cuda' And $([MSBuild]::IsOSPlatform('Linux'))">
+    <PackageReference Include="TorchSharp-cuda-linux" Version="0.107.0" />
+  </ItemGroup>
+
+</Project>

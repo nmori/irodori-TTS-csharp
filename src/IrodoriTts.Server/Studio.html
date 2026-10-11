@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Irodori キャラクター作成</title>
+<style>
+  :root { --bg:#f6f6f4; --card:#fff; --fg:#222; --muted:#6b6b6b; --line:#e2e2de; --accent:#3b6ea8; --danger:#b23b3b; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#1b1c1e; --card:#25272a; --fg:#e8e8e6; --muted:#a0a0a0; --line:#3a3c40; --accent:#7fa8db; --danger:#e07a7a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.6 "Yu Gothic UI","Meiryo",system-ui,sans-serif; }
+  main { max-width:860px; margin:0 auto; padding:24px 16px 48px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  h2 { font-size:17px; margin:0 0 12px; }
+  .lead, .hint { color:var(--muted); }
+  .hint { font-size:13px; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:18px; margin-top:18px; }
+  textarea, input[type=text], input[type=number] { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:6px; background:transparent; color:inherit; font:inherit; }
+  textarea { min-height:64px; resize:vertical; }
+  label { display:block; font-size:13px; color:var(--muted); margin:10px 0 4px; }
+  .row { display:flex; gap:10px; align-items:end; flex-wrap:wrap; }
+  .row > * { flex:1 1 160px; }
+  .row > .fit { flex:0 0 auto; }
+  button { padding:8px 14px; border-radius:6px; border:1px solid var(--accent); background:var(--accent); color:#fff; font:inherit; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--accent); }
+  button.danger { background:transparent; border-color:var(--danger); color:var(--danger); }
+  button:disabled { opacity:.5; cursor:default; }
+  ul { list-style:none; margin:0; padding:0; }
+  li.item { display:flex; gap:10px; align-items:center; flex-wrap:wrap; padding:10px 0; border-top:1px solid var(--line); }
+  li.item:first-child { border-top:0; }
+  li.item .name { font-weight:600; min-width:140px; }
+  li.item .meta { color:var(--muted); font-size:13px; flex:1 1 120px; }
+  li.item input[type=text] { width:180px; flex:0 0 auto; }
+  audio { height:32px; max-width:100%; }
+  #status { font-size:13px; }
+  .empty { color:var(--muted); padding:6px 0; }
+  .busy::after { content:" …"; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Irodori キャラクター作成</h1>
+  <p class="lead">参照音声なしの声(<code>none</code>、PlayEngine の一覧では「ランダム」)は毎回ランダムな話者になります。気に入った声を生成して名前を付けて保存すると、その声で固定されたキャラクターとして話者一覧から選べるようになります。</p>
+  <div id="status" class="hint">サーバーに接続しています…</div>
+
+  <section>
+    <h2>1. 声を生成して試聴する</h2>
+    <label for="sample">見本の文(この文の読み上げがキャラクターの参照音声になります。5〜15 秒くらいが目安です)</label>
+    <textarea id="sample">こんにちは。今日はとても良い天気ですね。少し散歩でもしながら、ゆっくりお話ししましょうか。</textarea>
+    <div class="row">
+      <div><label for="seed">シード(空欄ならランダム)</label><input id="seed" type="number" min="0" placeholder="ランダム"></div>
+      <div class="fit"><button id="gen">声を生成</button></div>
+      <div class="fit"><button id="gen5" class="ghost">5 人分まとめて生成</button></div>
+    </div>
+    <p class="hint">同じシードと見本の文なら同じ声になります。生成した候補はこのページを閉じると消えるので、気に入った声は保存してください。</p>
+    <ul id="candidates"><li class="empty">まだ候補はありません。</li></ul>
+  </section>
+
+  <section>
+    <h2>2. 登録済みのキャラクター</h2>
+    <label for="trial">試し読みの文</label>
+    <input id="trial" type="text" value="こちらは登録したキャラクターの声です。ちゃんと同じ声で話せていますか？">
+    <ul id="voices" style="margin-top:10px"><li class="empty">読み込み中…</li></ul>
+    <p class="hint">キャラクターは voices フォルダの WAV ファイルとして保存されます。PlayEngine の話者一覧には「名前/IrodoriTTS」として表示されます(反映まで 30 秒ほどかかることがあります)。</p>
+  </section>
+</main>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+let model = "irodori-tts";
+const invalidName = /[\\/:*?"<>|]/;
+
+function setStatus(text) { $("status").textContent = text; }
+
+async function api(path, init) {
+  const r = await fetch(path, init);
+  if (!r.ok) {
+    let msg = r.status + " " + r.statusText;
+    try { const j = await r.json(); if (j.error && j.error.message) msg = j.error.message; } catch (_) {}
+    throw new Error(msg);
+  }
+  return r;
+}
+
+async function synthesize(text, voice, seed) {
+  const body = { model, input: text, voice, response_format: "wav" };
+  if (seed !== undefined) body.irodori = { seed };
+  const r = await api("/v1/audio/speech", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  return await r.blob();
+}
+
+function audioFor(blob, autoplay) {
+  const a = document.createElement("audio");
+  a.controls = true;
+  a.src = URL.createObjectURL(blob);
+  if (autoplay) a.play().catch(() => {});
+  return a;
+}
+
+function randomSeed() { return Math.floor(Math.random() * 2147483647); }
+
+async function generate(count) {
+  const text = $("sample").value.trim();
+  if (!text) { alert("見本の文を入力してください。"); return; }
+  const fixed = $("seed").value.trim();
+  const buttons = [$("gen"), $("gen5")];
+  buttons.forEach(b => b.disabled = true);
+  const list = $("candidates");
+  if (list.querySelector(".empty")) list.innerHTML = "";
+  try {
+    for (let i = 0; i < count; i++) {
+      const seed = fixed !== "" && count === 1 ? Number(fixed) : randomSeed();
+      setStatus(`生成中 (${i + 1}/${count}) シード ${seed}`);
+      const blob = await synthesize(text, "none", seed);
+      list.prepend(candidateItem(blob, seed, i === 0));
+    }
+    setStatus("生成しました。気に入った声に名前を付けて保存してください。");
+  } catch (e) {
+    setStatus("生成に失敗しました: " + e.message);
+  } finally {
+    buttons.forEach(b => b.disabled = false);
+  }
+}
+
+function candidateItem(blob, seed, autoplay) {
+  const li = document.createElement("li");
+  li.className = "item";
+  const meta = document.createElement("span");
+  meta.className = "meta";
+  meta.textContent = "シード " + seed;
+  const name = document.createElement("input");
+  name.type = "text";
+  name.placeholder = "キャラクター名";
+  const save = document.createElement("button");
+  save.textContent = "保存";
+  save.onclick = async () => {
+    const id = name.value.trim();
+    if (!id) { name.focus(); return; }
+    if (invalidName.test(id) || id === "none" || id === "." || id === "..") { alert("この名前は使えません(\\ / : * ? \" < > | と none は不可)。"); return; }
+    const exists = currentVoices.includes(id.toLowerCase());
+    if (exists && !confirm(`「${id}」は登録済みです。上書きしますか？`)) return;
+    save.disabled = true;
+    try {
+      const form = new FormData();
+      form.append("voice_id", id);
+      form.append("file", blob, id + ".wav");
+      await api("/v1/audio/voices", { method: "POST", body: form });
+      setStatus(`「${id}」を保存しました。`);
+      meta.textContent = `シード ${seed} → 「${id}」として保存済み`;
+      await loadVoices();
+    } catch (e) {
+      setStatus("保存に失敗しました: " + e.message);
+    } finally {
+      save.disabled = false;
+    }
+  };
+  li.append(audioFor(blob, autoplay), meta, name, save);
+  return li;
+}
+
+let currentVoices = [];
+
+async function loadVoices() {
+  const list = $("voices");
+  try {
+    const j = await (await api("/v1/audio/voices")).json();
+    const voices = (j.data || []).filter(v => v.id !== "none");
+    currentVoices = voices.map(v => v.id.toLowerCase());
+    list.innerHTML = "";
+    if (voices.length === 0) {
+      list.innerHTML = '<li class="empty">まだありません。上で声を生成して保存してください。</li>';
+      return;
+    }
+    for (const v of voices) list.append(voiceItem(v));
+  } catch (e) {
+    list.innerHTML = "";
+    const li = document.createElement("li");
+    li.className = "empty";
+    li.textContent = "一覧を取得できませんでした: " + e.message;
+    list.append(li);
+  }
+}
+
+function voiceItem(v) {
+  const li = document.createElement("li");
+  li.className = "item";
+  const name = document.createElement("span");
+  name.className = "name";
+  name.textContent = v.id;
+  const meta = document.createElement("span");
+  meta.className = "meta";
+  meta.textContent = (v.files || []).join(", ");
+  const play = document.createElement("button");
+  play.className = "ghost";
+  play.textContent = "試聴";
+  const slot = document.createElement("span");
+  play.onclick = async () => {
+    const text = $("trial").value.trim();
+    if (!text) return;
+    play.disabled = true;
+    play.classList.add("busy");
+    try {
+      slot.replaceChildren(audioFor(await synthesize(text, v.id), true));
+    } catch (e) {
+      setStatus("試聴に失敗しました: " + e.message);
+    } finally {
+      play.disabled = false;
+      play.classList.remove("busy");
+    }
+  };
+  const del = document.createElement("button");
+  del.className = "danger";
+  del.textContent = "削除";
+  del.onclick = async () => {
+    if (!confirm(`「${v.id}」を削除しますか？(voices フォルダのファイルも消えます)`)) return;
+    try {
+      await api("/v1/audio/voices/" + encodeURIComponent(v.id), { method: "DELETE" });
+      setStatus(`「${v.id}」を削除しました。`);
+      await loadVoices();
+    } catch (e) {
+      setStatus("削除に失敗しました: " + e.message);
+    }
+  };
+  li.append(name, meta, play, slot, del);
+  return li;
+}
+
+$("gen").onclick = () => generate(1);
+$("gen5").onclick = () => generate(5);
+
+(async () => {
+  try {
+    const h = await (await api("/health")).json();
+    model = h.model || model;
+    setStatus(`接続しました(${h.backend})。保存先: ${h.voices_dir}`);
+    if (h.allow_no_ref_voice === false) setStatus("このサーバーは参照音声なしの生成が無効です(--allow-no-ref-voice false)。新しい声は生成できません。");
+  } catch (e) {
+    setStatus("サーバーに接続できません: " + e.message);
+  }
+  await loadVoices();
+})();
+</script>
+</body>
+</html>

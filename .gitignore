@@ -1,0 +1,10 @@
+bin/
+obj/
+*.user
+.vs/
+*.wav
+!samples/*.wav
+TestResults/
+# Preset characters shipped with the server
+!src/IrodoriTts.Server/voices/*.wav
+__pycache__/

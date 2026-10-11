@@ -1,0 +1,55 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>irodori-tts-server</AssemblyName>
+    <RootNamespace>IrodoriTts.Server</RootNamespace>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <!-- Native libtorch backend: cpu (default) or cuda. Build with -p:TorchBackend=cuda for NVIDIA GPUs. -->
+    <TorchBackend Condition="'$(TorchBackend)' == ''">cpu</TorchBackend>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\IrodoriTts\IrodoriTts.csproj" />
+    <ProjectReference Include="..\IrodoriTts.Onnx\IrodoriTts.Onnx.csproj" />
+    <Compile Include="..\Shared\TtsBackend.cs" Link="Shared\TtsBackend.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Default voices folder shipped next to the exe (users drop WAV files here). -->
+    <None Include="voices\README.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <!-- Preset characters: no-reference voices generated with fixed seeds (see voices\README.txt), selectable out of the box. -->
+    <None Include="voices\*.wav" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <!-- Opens the character studio (starts the server first when it is not running). -->
+    <None Include="キャラクター作成.cmd" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Character studio page served at GET / -->
+    <EmbeddedResource Include="Studio.html" LogicalName="Studio.html" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TorchBackend)' == 'cpu'">
+    <PackageReference Include="TorchSharp-cpu" Version="0.107.0" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(TorchBackend)' == 'cuda' And $([MSBuild]::IsOSPlatform('Windows'))">
+    <PackageReference Include="TorchSharp-cuda-windows" Version="0.107.0" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(TorchBackend)' == 'cuda' And $([MSBuild]::IsOSPlatform('Linux'))">
+    <PackageReference Include="TorchSharp-cuda-linux" Version="0.107.0" />
+  </ItemGroup>
+
+  <!--
+    NVIDIA DLLs that come with libtorch but are not on the redistributable list (Attachment A of the CUDA EULA)
+    and that nothing in the package loads: cusolverMg (multi-GPU solver) and nvperf_host (profiler host).
+    Keep them out of the output so the package only ships redistributable NVIDIA files.
+  -->
+  <Target Name="DropNonRedistributableNvidiaFiles" AfterTargets="ComputeResolvedFilesToPublishList" Condition="'$(TorchBackend)' == 'cuda'">
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)" Condition="'%(Filename)%(Extension)' == 'cusolverMg64_11.dll' Or '%(Filename)%(Extension)' == 'nvperf_host.dll'" />
+    </ItemGroup>
+  </Target>
+
+</Project>

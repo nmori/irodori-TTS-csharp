@@ -1,0 +1,7 @@
+<Project>
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Version>0.1.0</Version>
+    <Authors>Irodori-TTS C# port</Authors>
+  </PropertyGroup>
+</Project>
