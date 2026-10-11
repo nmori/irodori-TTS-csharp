@@ -188,13 +188,33 @@ irodori-tts-server --voices-dir D:\voices --model-precision bf16    # 既定で 
 - 声は `--voices-dir`（`IRODORI_VOICES_DIR`）の `*.wav` / `*.speaker.safetensors` と `voices.json` から読みます
   （ファイル名がそのまま声の ID。`voices.json` で `{"id": {"ref_wavs": ["a.wav", "b.wav"]}}` のように複数クリップをまとめられます）。
   サーバー起動中に追加したファイルもすぐ使えます
-- `voice: "none"` で参照音声なし（キャプションだけで声を作る）。`--allow-no-ref-voice false` で無効化
+- `voice: "none"` で参照音声なし（話すたびに違う声になる）。`--allow-no-ref-voice false` で無効化
 - `speed` は話速（尺予測の結果を 1/speed 倍）。0.25〜4.0
 - 環境変数も Python 版と同じ名前（`IRODORI_API_KEY`, `IRODORI_DEFAULT_VOICE`, `IRODORI_MODEL_NAME` など）
 - 参照音声の潜在表現はキャッシュするので、同じ声の 2 回目以降は速くなります（RTX 4050 で 4.6 秒の音声を約 1.1 秒）
 - 実行方式（`--backend`, `--onnx-dir` など）は CLI と同じです
 - Python 版との違い: `response_format` は `wav` / `pcm` のみ（mp3 / flac / opus / aac は未対応）、
   `stream_format: "sse"` と文単位の分割合成（`chunking_*`）、`lora_adapter`、`.pt` の参照潜在は未対応です
+
+### 配布用の発行（CPU 版を同梱し、CUDA 版は必要な PC だけが取得）
+
+```powershell
+dotnet publish src/IrodoriTts.Server -c Release -r win-x64 --self-contained true -p:TorchBackend=cpu -o out\irodori-tts
+```
+
+- 配布物は約 430 MB です。LibTorch は CPU 版だけを `libtorch-cpu\` に入れます（exe の隣には置きません）
+- NVIDIA のドライバーがある PC では、初回の起動時に CUDA 版の LibTorch（nuget.org の `libtorch-cuda-12.8-win-x64` 2.10.0、
+  約 2.7 GB）を `%LOCALAPPDATA%\IrodoriTts\runtime` へ取得し、以後はそれを使います。パッケージは nuget.org の SHA-512 で、
+  分割された DLL はつなぎ直した後の SHA-256 で確かめます。途中で切れても続きから取り直します
+- CPU 版と CUDA 版は torch_cpu.dll などが同名で、同じプロセスに両方が読み込まれると落ちます。そのため起動時に
+  どちらか一方だけを、TorchSharp より先に読み込みます（`LibTorchRuntime`）
+- 取得先はユーザーごとのフォルダなので、管理者権限（権限昇格）は要りません。環境変数 `IRODORI_TTS_CACHE` を設定すると、
+  モデルと同じく `%IRODORI_TTS_CACHE%\runtime` に置きます（C ドライブが小さい PC 向け）
+- 取得の前に空き容量を確かめます（取得中は約 6.8 GB、完了後は約 4.1 GB）。足りないとき・保存先が無いとき・
+  ポリシーでユーザーフォルダの DLL が読み込めないときは、CPU で動きます
+- `--no-cuda-download` で取得せずに CPU で動かします。`--cuda-runtime-dir <DIR>` で保存先を変えられます
+  （torch_cuda.dll が入っているフォルダなら、ほかの PC から写したものをそのまま使います）
+- 取得できなかったとき（オフラインなど）は CPU で動きます。`-p:TorchBackend=cuda` で発行すると、従来どおり CUDA 版を同梱します（約 4 GB）
 
 ## どの PC でも動かす（ONNX Runtime + WebGPU）
 

@@ -17,4 +17,8 @@
     <PackageReference Include="TorchSharp" Version="0.107.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="IrodoriTts.Tests" />
+  </ItemGroup>
+
 </Project>

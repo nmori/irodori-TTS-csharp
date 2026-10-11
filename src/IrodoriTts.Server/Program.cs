@@ -106,6 +106,11 @@ internal static class Args
           --webgpu-power high-performance|low-power
           --checkpoint <PATH> | --hf-checkpoint <REPO>   --codec-weights <PATH> | --codec-repo <REPO>
           --model-device cpu|cuda  --model-precision fp32|bf16|auto (auto: bf16 on CUDA, else fp32)  --codec-device <D>  --codec-precision <P>
+          --no-cuda-download         Do not download the CUDA build of LibTorch on an NVIDIA PC (use the CPU)
+          --cuda-runtime-dir <DIR>   Keep / find the CUDA build of LibTorch in DIR. Default: downloaded once,
+                                     when an NVIDIA driver is present, to %IRODORI_TTS_CACHE%\runtime or else
+                                     %LOCALAPPDATA%\IrodoriTts\runtime (per-user, no admin rights needed).
+                                     Without enough free space (~7 GB while installing) the CPU is used
         """;
 
     public static Dictionary<string, List<string>> Parse(string[] argv)

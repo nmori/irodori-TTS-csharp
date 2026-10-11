@@ -34,6 +34,16 @@ internal sealed class TtsBackend(
     {
         string backend = (option("backend") ?? "auto").ToLowerInvariant();
         string? onnxDir = option("onnx-dir");
+        // The distributed server carries only the CPU build of LibTorch; on an NVIDIA PC the CUDA build is
+        // downloaded once. Either way it has to be loaded before the first TorchSharp call below.
+        string? requestedDevice = option("model-device");
+        string? libtorch = await LibTorchRuntime.Prepare(
+            option("cuda-runtime-dir"),
+            allowDownload: !flag("no-cuda-download"),
+            wantCuda: backend != "onnx" && (requestedDevice is null || requestedDevice.StartsWith("cuda", StringComparison.OrdinalIgnoreCase)),
+            log,
+            new Progress<(string File, long D, long? T)>(x => ReportDownload(x.File, x.D, x.T)));
+        if (libtorch is not null) log($"[runtime] LibTorch: {libtorch}");
         bool cuda = TorchSharp.torch.cuda.is_available();
         string? autoOnnxDevice = null;
         if (backend == "auto")

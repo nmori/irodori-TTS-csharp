@@ -42,6 +42,19 @@
   </ItemGroup>
 
   <!--
+    CPU package (the distributed one): keep LibTorch out of the exe's folder, in libtorch-cpu\. At start-up
+    LibTorchRuntime loads either this or the CUDA build downloaded on an NVIDIA PC; both carry torch_cpu.dll /
+    c10.dll, and a copy next to the exe would be loaded as well (TorchSharp probes the exe's folder by full path).
+  -->
+  <Target Name="MoveCpuLibTorchToSubfolder" AfterTargets="ComputeResolvedFilesToPublishList" Condition="'$(TorchBackend)' == 'cpu' And $(RuntimeIdentifier.StartsWith('win'))">
+    <ItemGroup>
+      <_CpuLibTorch Include="@(ResolvedFileToPublish)" Condition="'%(ResolvedFileToPublish.NuGetPackageId)' == 'libtorch-cpu-win-x64'" />
+      <ResolvedFileToPublish Remove="@(_CpuLibTorch)" />
+      <ResolvedFileToPublish Include="@(_CpuLibTorch)" RelativePath="libtorch-cpu\%(Filename)%(Extension)" />
+    </ItemGroup>
+  </Target>
+
+  <!--
     NVIDIA DLLs that come with libtorch but are not on the redistributable list (Attachment A of the CUDA EULA)
     and that nothing in the package loads: cusolverMg (multi-GPU solver) and nvperf_host (profiler host).
     Keep them out of the output so the package only ships redistributable NVIDIA files.
