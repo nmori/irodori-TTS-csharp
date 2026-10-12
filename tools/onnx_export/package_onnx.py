@@ -101,7 +101,8 @@ def main() -> None:
     ap.add_argument("--base-url", required=True, help="URL of the folder the parts are uploaded to")
     ap.add_argument("--source-model", default=None, help="Hugging Face repo of the checkpoint (for README.txt)")
     ap.add_argument("--part-mb", type=int, default=200)
-    ap.add_argument("--min-server-version", default="0.1.0")
+    ap.add_argument("--min-server-version", default="0.2.0",
+                    help="0.2.0: dit_context + dit_step_kv (servers before 0.2.0 only read dit_step.onnx)")
     ap.add_argument("--keep-zip", action="store_true", help="keep the whole ZIP next to the parts")
     args = ap.parse_args()
 
