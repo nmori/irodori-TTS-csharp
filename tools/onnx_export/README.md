@@ -67,8 +67,10 @@ python package_onnx.py --model-dir D:\models\irodori-v4.1-small-mf-onnx --out D:
   `licenses/` のライセンス本文（MIT: Aratako, SB Intuitions / Apache-2.0: Meta の DACVAE）
 - ZIP の分割はバイト単位なので、つなげれば普通の ZIP です（`copy /b a.zip.001 + a.zip.002 ... a.zip`、または 7-Zip で `.001` を開く）
 - 同じフォルダからは同じバイト列になります（項目の順番と日時を固定）。分割ファイルをつないだときのハッシュと CRC は作成時に確かめます
-- `irodori-onnx.json` が `--out` にあれば、同じ `--id` の項目だけを置き換えます。一覧は毎回同じ URL に上書きしてください
+- `irodori-onnx.json` が `--out` にあれば、同じ `--id` で同じ `min_server_version` の項目だけを置き換えます。一覧は毎回同じ URL に上書きしてください
   （版を変えた分割ファイルは別名になるので、古い版を使っている途中の取得を壊しません）
-- `--min-server-version`（既定 `0.2.0`）より古いサーバーは、その版を取得せず手元のモデルを使い続けます。
-  0.2.0 からの書き出し（`dit_context` + `dit_step_kv`）は 0.1.0 のサーバーでは読めないので、アプリを先に配布してから一覧を更新してください。
-  0.1.0 のサーバーにも配る形式が必要なときは `--legacy-dit-step` で書き出し、`--min-server-version 0.1.0` を指定します
+- `--min-server-version`（既定 `0.2.0`）: その版より古いサーバーは、この項目を取得しません。
+  0.2.0 からの書き出し（`dit_context` + `dit_step_kv`）は 0.1.0 のサーバーでは読めないため 0.2.0 です
+- 一覧に同じ `--id` で `min_server_version` の古い項目があれば残し（`--drop-older` で消す）、古い順に並べます。
+  0.2.0 以降のサーバーは自分が読める最新の版を選び、0.1.0 のサーバーは同じ ID の先頭の項目を使うので、
+  新旧どちらのサーバーにも読める版が届きます。残した項目の分割ファイルは消さないでください

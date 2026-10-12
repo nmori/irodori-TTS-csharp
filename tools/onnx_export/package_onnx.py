@@ -103,6 +103,8 @@ def main() -> None:
     ap.add_argument("--part-mb", type=int, default=200)
     ap.add_argument("--min-server-version", default="0.2.0",
                     help="0.2.0: dit_context + dit_step_kv (servers before 0.2.0 only read dit_step.onnx)")
+    ap.add_argument("--drop-older", action="store_true",
+                    help="remove entries of this id for older servers (default: keep them, one per min_server_version)")
     ap.add_argument("--keep-zip", action="store_true", help="keep the whole ZIP next to the parts")
     args = ap.parse_args()
 
@@ -200,11 +202,24 @@ def main() -> None:
         "zip": {"name": name, "bytes": zip_bytes, "sha256": zip_sha},
         "parts": parts,
     }
-    models = [m for m in manifest.get("models", []) if m.get("id") != args.id] + [entry]
+    # Entries of the same id that need an older server stay, so those servers keep finding a version they can
+    # read: servers from 0.2.0 pick the newest version they can read, older ones take the first entry of the id.
+    # Hence one entry per min_server_version, oldest first; an entry with the same min_server_version is replaced.
+    def ver(text):
+        return tuple(int(x) for x in str(text).split("."))
+
+    kept = []
+    for m in manifest.get("models", []):
+        if m.get("id") != args.id:
+            kept.append(m)
+        elif not args.drop_older and ver(m.get("min_server_version", "0.0")) < ver(args.min_server_version):
+            kept.append(m)
+            print(f"[manifest] keeping {m['id']} {m['version']} for servers from {m.get('min_server_version', '0.0')}", flush=True)
+    models = kept + [entry]
     manifest = {
         "format_version": FORMAT_VERSION,
         "updated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "models": sorted(models, key=lambda m: m["id"]),
+        "models": sorted(models, key=lambda m: (m["id"], ver(m.get("min_server_version", "0.0")), m["version"])),
     }
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"[manifest] {manifest_path}", flush=True)

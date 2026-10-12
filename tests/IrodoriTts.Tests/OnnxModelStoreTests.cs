@@ -352,6 +352,34 @@ public sealed class OnnxModelStoreTests : IDisposable
         Assert.Throws<InvalidDataException>(() => OnnxModelStore.ParseManifest(json, Id));
     }
 
+    /// <summary>Two entries of one id, the older one first (the order servers before 0.2.0 rely on).</summary>
+    private static string TwoVersionManifest(byte[] zip, List<byte[]> parts)
+    {
+        var older = JsonNode.Parse(Manifest("http://localhost/", "20260101", zip, parts, minServer: "0.1.0"))!;
+        var newer = JsonNode.Parse(Manifest("http://localhost/", "20260201", zip, parts, minServer: "0.2.0"))!;
+        older["models"]!.AsArray().Add(newer["models"]![0]!.DeepClone());
+        return older.ToJsonString();
+    }
+
+    [Theory]
+    [InlineData("0.1.0", "20260101")]
+    [InlineData("0.2.0", "20260201")]
+    [InlineData("0.3.0", "20260201")]
+    public void PicksTheNewestVersionTheServerCanRead(string server, string expected)
+    {
+        var (zip, parts) = Package();
+        var entry = OnnxModelStore.ParseManifest(TwoVersionManifest(zip, parts), Id, Version.Parse(server));
+        Assert.Equal(expected, entry.Version);
+    }
+
+    [Fact]
+    public void NoReadableVersionReturnsTheNewestSoInstallRefusesIt()
+    {
+        var (zip, parts) = Package();
+        var entry = OnnxModelStore.ParseManifest(TwoVersionManifest(zip, parts), Id, new Version(0, 0, 9));
+        Assert.Equal("20260201", entry.Version);
+    }
+
     [Fact]
     public void FreeSpaceCountsTheRestOfTheZipAndTheUnpackedFolder()
     {

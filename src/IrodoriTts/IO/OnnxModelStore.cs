@@ -82,8 +82,16 @@ public static partial class OnnxModelStore
         string Id, string Version, string Folder, Version MinServerVersion, long UnpackedBytes,
         long ZipBytes, string ZipSha256, IReadOnlyList<(string Url, long Bytes, string Sha256)> Parts);
 
-    /// <summary>Parse a manifest and pick <paramref name="id"/>. Names used as paths are checked to be plain names.</summary>
-    public static ModelEntry ParseManifest(string json, string id)
+    /// <summary>
+    /// Parse a manifest and pick <paramref name="id"/>. A manifest may list several versions of one id for servers
+    /// of different ages: the newest version this server can read (<c>min_server_version</c>) is chosen; when none
+    /// qualifies, the newest one is returned and <see cref="InstallAsync(string, ModelEntry, Action{OnnxModelStatus}?, Action{string}, CancellationToken)"/>
+    /// refuses it. Servers before 0.2.0 take the first entry of the id, so older versions go first.
+    /// Names used as paths are checked to be plain names.
+    /// </summary>
+    public static ModelEntry ParseManifest(string json, string id) => ParseManifest(json, id, ServerVersion);
+
+    internal static ModelEntry ParseManifest(string json, string id, Version serverVersion)
     {
         var root = JsonNode.Parse(json)?.AsObject() ?? throw new InvalidDataException("The model manifest is empty.");
         int format = root["format_version"]?.GetValue<int>() ?? 0;
@@ -91,8 +99,18 @@ public static partial class OnnxModelStore
         {
             throw new NotSupportedException($"The model manifest has format_version {format}; this server reads {ManifestFormatVersion}. Update the server.");
         }
-        var m = root["models"]?.AsArray().OfType<JsonObject>().FirstOrDefault(x => x["id"]?.GetValue<string>() == id)
-            ?? throw new InvalidDataException($"The model manifest has no model '{id}'.");
+        var entries = (root["models"]?.AsArray().OfType<JsonObject>() ?? [])
+            .Where(x => x["id"]?.GetValue<string>() == id)
+            .Select(ParseEntry)
+            .ToList();
+        if (entries.Count == 0) throw new InvalidDataException($"The model manifest has no model '{id}'.");
+        // Versions are YYYYMMDD[...] names: ordinal order is release order.
+        var newestFirst = entries.OrderByDescending(e => e.Version, StringComparer.Ordinal).ToList();
+        return newestFirst.FirstOrDefault(e => e.MinServerVersion <= serverVersion) ?? newestFirst[0];
+    }
+
+    private static ModelEntry ParseEntry(JsonObject m)
+    {
         string Name(string key)
         {
             string v = m[key]?.GetValue<string>() ?? throw new InvalidDataException($"The model manifest entry has no '{key}'.");
