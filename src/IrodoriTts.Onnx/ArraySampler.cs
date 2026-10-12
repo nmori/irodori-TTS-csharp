@@ -85,45 +85,104 @@ internal sealed record Conditions(
 internal sealed class ArraySampler
 {
     private readonly InferenceSession _dit;
+    private readonly InferenceSession? _context;
     private readonly ModelConfig _cfg;
     private readonly NormalRng _rng;
     private readonly Func<long, float[]> _normal;
 
-    public ArraySampler(InferenceSession dit, ModelConfig cfg, long seed, Func<long, long, float[]>? noise = null)
+    /// <param name="dit">dit_step_kv.onnx when <paramref name="context"/> is given, otherwise the legacy dit_step.onnx.</param>
+    /// <param name="context">dit_context.onnx: the conditioning K/V of every layer, computed once per condition set.</param>
+    public ArraySampler(InferenceSession dit, InferenceSession? context, ModelConfig cfg, long seed, Func<long, long, float[]>? noise = null)
     {
         _dit = dit;
+        _context = context;
         _cfg = cfg;
         _rng = new NormalRng(seed);
         _normal = noise is null ? _rng.Normal : count => noise(seed, count);
     }
 
-    /// <summary>Static condition inputs converted once to the DiT input dtype.</summary>
+    /// <summary>True when the speaker K/V can be scaled (<see cref="SamplingRequest.SpeakerKvScale"/>).</summary>
+    public bool SupportsSpeakerKvScale => _context is not null && _cfg.UseSpeakerConditionResolved;
+
+    /// <summary>Static condition inputs converted once to the DiT input dtype (and, with dit_context, projected to K/V).</summary>
     private sealed class BoundConditions : IDisposable
     {
         public readonly Dictionary<string, OrtValue> Values = new();
+        public readonly List<IDisposable> Owned = new();
         public long Batch;
 
         public void Dispose()
         {
-            foreach (var v in Values.Values) v.Dispose();
+            foreach (var v in Owned) v.Dispose();
         }
     }
 
-    private BoundConditions Bind(Conditions c)
+    /// <param name="speakerKvScale">Per-layer multiplier on the speaker K/V (dit_context only; null = 1).</param>
+    private BoundConditions Bind(Conditions c, float[]? speakerKvScale = null)
     {
-        var b = new BoundConditions { Batch = c.TextState.Shape[0] };
-        b.Values["text_state"] = OrtHelpers.FloatAs(_dit, "text_state", c.TextState.Data, c.TextState.Shape);
-        b.Values["text_mask"] = OrtHelpers.MaskAs(_dit, "text_mask", c.TextMask!, new long[] { c.TextState.Shape[0], c.TextState.Shape[1] });
-        if (c.SpeakerState is not null && _dit.InputMetadata.ContainsKey("speaker_state"))
+        long batch = c.TextState.Shape[0];
+        var b = new BoundConditions { Batch = batch };
+        if (_context is null)
         {
-            b.Values["speaker_state"] = OrtHelpers.FloatAs(_dit, "speaker_state", c.SpeakerState.Data, c.SpeakerState.Shape);
-            b.Values["speaker_mask"] = OrtHelpers.MaskAs(_dit, "speaker_mask", c.SpeakerMask!, new long[] { c.SpeakerState.Shape[0], c.SpeakerState.Shape[1] });
+            void Add(string name, OrtValue v)
+            {
+                b.Values[name] = v;
+                b.Owned.Add(v);
+            }
+            Add("text_state", OrtHelpers.FloatAs(_dit, "text_state", c.TextState.Data, c.TextState.Shape));
+            Add("text_mask", OrtHelpers.MaskAs(_dit, "text_mask", c.TextMask!, new long[] { batch, c.TextState.Shape[1] }));
+            if (c.SpeakerState is not null && _dit.InputMetadata.ContainsKey("speaker_state"))
+            {
+                Add("speaker_state", OrtHelpers.FloatAs(_dit, "speaker_state", c.SpeakerState.Data, c.SpeakerState.Shape));
+                Add("speaker_mask", OrtHelpers.MaskAs(_dit, "speaker_mask", c.SpeakerMask!, new long[] { batch, c.SpeakerState.Shape[1] }));
+            }
+            if (c.CaptionState is not null && _dit.InputMetadata.ContainsKey("caption_state"))
+            {
+                Add("caption_state", OrtHelpers.FloatAs(_dit, "caption_state", c.CaptionState.Data, c.CaptionState.Shape));
+                Add("caption_mask", OrtHelpers.MaskAs(_dit, "caption_mask", c.CaptionMask!, new long[] { batch, c.CaptionState.Shape[1] }));
+            }
+            return b;
         }
-        if (c.CaptionState is not null && _dit.InputMetadata.ContainsKey("caption_state"))
+
+        // Context K/V in kv order text[, speaker][, caption], kept on the device for every step.
+        var segments = new List<(HostTensor State, bool[] Mask)> { (c.TextState, c.TextMask) };
+        if (_cfg.UseSpeakerConditionResolved) segments.Add((c.SpeakerState ?? throw new InvalidOperationException("speaker state missing"), c.SpeakerMask!));
+        if (_cfg.UseCaptionCondition) segments.Add((c.CaptionState ?? throw new InvalidOperationException("caption state missing"), c.CaptionMask!));
+        int ctxLen = segments.Sum(s => (int)s.State.Shape[1]);
+        var ctxMask = new bool[batch * ctxLen];
+        for (int row = 0; row < batch; row++)
         {
-            b.Values["caption_state"] = OrtHelpers.FloatAs(_dit, "caption_state", c.CaptionState.Data, c.CaptionState.Shape);
-            b.Values["caption_mask"] = OrtHelpers.MaskAs(_dit, "caption_mask", c.CaptionMask!, new long[] { c.CaptionState.Shape[0], c.CaptionState.Shape[1] });
+            int off = 0;
+            foreach (var (state, mask) in segments)
+            {
+                int len = (int)state.Shape[1];
+                Array.Copy(mask, row * len, ctxMask, row * ctxLen + off, len);
+                off += len;
+            }
         }
+
+        var scale = speakerKvScale ?? Enumerable.Repeat(1f, _cfg.NumLayers).ToArray();
+        var inputs = new Dictionary<string, OrtValue>
+        {
+            ["text_state"] = OrtHelpers.FloatAs(_context, "text_state", c.TextState.Data, c.TextState.Shape),
+            ["speaker_kv_scale"] = OrtHelpers.FloatAs(_context, "speaker_kv_scale", scale, new long[] { scale.Length }),
+        };
+        if (c.SpeakerState is not null) inputs["speaker_state"] = OrtHelpers.FloatAs(_context, "speaker_state", c.SpeakerState.Data, c.SpeakerState.Shape);
+        if (c.CaptionState is not null) inputs["caption_state"] = OrtHelpers.FloatAs(_context, "caption_state", c.CaptionState.Data, c.CaptionState.Shape);
+        try
+        {
+            var kv = OrtHelpers.RunOnDevice(_context, inputs, "k_context", "v_context");
+            b.Owned.Add(kv);
+            b.Values["k_context"] = kv[0];
+            b.Values["v_context"] = kv[1];
+        }
+        finally
+        {
+            foreach (var v in inputs.Values) v.Dispose();
+        }
+        var maskValue = OrtHelpers.MaskAs(_dit, "context_mask", ctxMask, new long[] { batch, ctxLen });
+        b.Owned.Add(maskValue);
+        b.Values["context_mask"] = maskValue;
         return b;
     }
 
@@ -160,7 +219,9 @@ internal sealed class ArraySampler
         return r;
     }
 
-    public float[] SampleRf(Conditions cond, int batch, int seqLen, SamplingRequest req, int numSteps, bool hasCaptionText, List<string> messages)
+    /// <param name="speakerKv">Validated speaker K/V scaling (scale, min_t, max_layers); requires <see cref="SupportsSpeakerKvScale"/>.</param>
+    public float[] SampleRf(Conditions cond, int batch, int seqLen, SamplingRequest req, int numSteps, bool hasCaptionText, List<string> messages,
+        (double Scale, double MinT, int? MaxLayers)? speakerKv = null)
     {
         int dim = _cfg.PatchedLatentDim;
         int n = batch * seqLen * dim;
@@ -204,30 +265,56 @@ internal sealed class ArraySampler
             if (!(schedule[i] > schedule[i + 1])) throw new ArgumentException("t_schedule must be strictly decreasing.");
         }
 
-        using var condBound = Bind(cond);
+        // Speaker K/V scaling (Python: speaker_kv_scale on the cond / independent / alternating caches, not the
+        // joint one), undone once t falls below speaker_kv_min_t by projecting the context again unscaled.
+        float[]? kvScale = null;
+        if (speakerKv is { } skv)
+        {
+            if (!SupportsSpeakerKvScale) throw new NotSupportedException("speaker_kv_scale needs dit_context.onnx and a speaker-conditioned checkpoint.");
+            int layers = skv.MaxLayers is int m ? Math.Clamp(m, 0, _cfg.NumLayers) : _cfg.NumLayers;
+            kvScale = Enumerable.Range(0, _cfg.NumLayers).Select(i => i < layers ? (float)skv.Scale : 1f).ToArray();
+        }
+
+        Conditions? independentCond = null, jointCond = null;
+        var alternatingCond = new Dictionary<string, Conditions>();
+        if (enabled.Count > 0)
+        {
+            switch (mode)
+            {
+                case CfgGuidanceMode.Independent:
+                    independentCond = Conditions.Concat(
+                        new[] { cond }.Concat(enabled.Select(e => cond.Drop(e.Name, req.SpeakerUncondMode, _rng))).ToList());
+                    break;
+                case CfgGuidanceMode.Joint:
+                    var all = cond;
+                    foreach (var e in enabled) all = all.Drop(e.Name, req.SpeakerUncondMode, _rng);
+                    jointCond = all;
+                    break;
+                case CfgGuidanceMode.Alternating:
+                    foreach (var e in enabled) alternatingCond[e.Name] = cond.Drop(e.Name, req.SpeakerUncondMode, _rng);
+                    break;
+            }
+        }
+        BoundConditions condBound = Bind(cond, kvScale);
         BoundConditions? independent = null;
         BoundConditions? joint = null;
         var alternating = new Dictionary<string, BoundConditions>();
+        void BindScaled(float[]? scale)
+        {
+            if (independentCond is not null) independent = Bind(independentCond, scale);
+            foreach (var (name, c) in alternatingCond) alternating[name] = Bind(c, scale);
+        }
+        void DisposeScaled()
+        {
+            condBound.Dispose();
+            independent?.Dispose();
+            foreach (var b in alternating.Values) b.Dispose();
+            alternating.Clear();
+        }
         try
         {
-            if (enabled.Count > 0)
-            {
-                switch (mode)
-                {
-                    case CfgGuidanceMode.Independent:
-                        independent = Bind(Conditions.Concat(
-                            new[] { cond }.Concat(enabled.Select(e => cond.Drop(e.Name, req.SpeakerUncondMode, _rng))).ToList()));
-                        break;
-                    case CfgGuidanceMode.Joint:
-                        var all = cond;
-                        foreach (var e in enabled) all = all.Drop(e.Name, req.SpeakerUncondMode, _rng);
-                        joint = Bind(all);
-                        break;
-                    case CfgGuidanceMode.Alternating:
-                        foreach (var e in enabled) alternating[e.Name] = Bind(cond.Drop(e.Name, req.SpeakerUncondMode, _rng));
-                        break;
-                }
-            }
+            BindScaled(kvScale);
+            if (jointCond is not null) joint = Bind(jointCond);
 
             for (int step = 0; step < numSteps; step++)
             {
@@ -270,15 +357,22 @@ internal sealed class ArraySampler
                     for (int i = 0; i < n; i++) v[i] = (float)((ratio * (omt * v[i] + x[i]) - x[i]) / omt);
                 }
 
+                if (kvScale is not null && tNext < speakerKv!.Value.MinT && t >= speakerKv.Value.MinT)
+                {
+                    DisposeScaled();
+                    kvScale = null;
+                    condBound = Bind(cond);
+                    BindScaled(null);
+                }
+
                 float dt = tNext - t;
                 for (int i = 0; i < n; i++) x[i] += v[i] * dt;
             }
         }
         finally
         {
-            independent?.Dispose();
+            DisposeScaled();
             joint?.Dispose();
-            foreach (var b in alternating.Values) b.Dispose();
         }
         return x;
     }

@@ -21,7 +21,10 @@ python export_onnx.py --irodori-repo /path/to/Irodori-TTS \
 
 - 対応: v4 系（事前学習テキストエンコーダ = ModernBERT を使うチェックポイント）。通常版・MeanFlow 版の両方
 - `--dit-precision auto`（既定）: MeanFlow 版は fp32（Python と実質一致）、通常版は fp16（40 ステップを高速化）
-- `--only dit_step ...` で一部だけ書き出し直せます
+- `--only dit_context dit_step_kv ...` で一部だけ書き出し直せます
+- `--legacy-dit-step` で以前の `dit_step.onnx`（文脈の K/V を毎ステップ計算する 1 ファイル版）も書き出します。
+  今のランタイムは `dit_context.onnx` があればそちらを使い、なければ `dit_step.onnx` を使います
+- `dit_step_kv.onnx` は書き出し時に、元の `forward_with_encoded_conditions` と同じ結果になるかを確かめます（`[check]`）
 - 所要時間は約 3 分、出力は約 3〜4.5 GB
 
 出力フォルダ:
@@ -34,7 +37,8 @@ python export_onnx.py --irodori-repo /path/to/Irodori-TTS \
 | `text_encoder.onnx` | ModernBERT + テキスト/キャプション射影 |
 | `speaker_encoder.onnx` | 参照音声の潜在 → 話者状態 |
 | `duration.onnx` | 尺予測 |
-| `dit_step.onnx` | DiT の 1 ステップ（速度予測） |
+| `dit_context.onnx` | DiT の各層の文脈（テキスト・話者・キャプション）の K/V。リクエストごとに 1 回 |
+| `dit_step_kv.onnx` | DiT の 1 ステップ（速度予測）。文脈の K/V を入力に取る |
 | `dacvae_encoder.onnx` / `dacvae_decoder.onnx` | コーデック |
 
 ## WebGPU 対策として行っている書き換え

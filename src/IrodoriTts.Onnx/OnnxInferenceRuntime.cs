@@ -50,7 +50,7 @@ public sealed class OnnxInferenceRuntime : IDisposable
 
     private readonly object _lock = new();
     private readonly InferenceSession _text, _dit, _decoder;
-    private readonly InferenceSession? _speaker, _duration, _encoder;
+    private readonly InferenceSession? _speaker, _duration, _encoder, _ditContext;
     private readonly TextTokenizer _tokenizer;
     private readonly TextTokenizer? _captionTokenizer;
     private readonly int _sampleRate, _hop, _latentDim;
@@ -111,7 +111,17 @@ public sealed class OnnxInferenceRuntime : IDisposable
         _speaker = OpenOptional("speaker_encoder", encDevice);
         _duration = OpenOptional("duration", encDevice);
         _encoder = OpenOptional("dacvae_encoder", encDevice);
-        _dit = Open("dit_step", options.Device);
+        // dit_context.onnx + dit_step_kv.onnx project the conditioning K/V once per request; older exports only
+        // have dit_step.onnx, which projects them in every layer of every step.
+        if (File.Exists(Path.Combine(dir, "dit_context.onnx")))
+        {
+            _ditContext = Open("dit_context", options.Device);
+            _dit = Open("dit_step_kv", options.Device);
+        }
+        else
+        {
+            _dit = Open("dit_step", options.Device);
+        }
         _decoder = Open("dacvae_decoder", options.Device);
     }
 
@@ -321,25 +331,46 @@ public sealed class OnnxInferenceRuntime : IDisposable
         bool hasCaptionText = cfg.UseCaptionCondition && !string.IsNullOrWhiteSpace(req.Caption);
         long seed = req.Seed ?? (long)(BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8)) >> 1);
         if (req.Seed is null) Info($"info: seed not specified; using random seed {seed}.");
-        if (req.SpeakerKvScale is not null) Info("info: speaker_kv_scale is not supported by the ONNX backend; ignoring.");
+        (double, double, int?)? speakerKv = null;
+        if (req.SpeakerKvScale is double kvScale)
+        {
+            if (!cfg.UseSpeakerConditionResolved || req.NoRef)
+            {
+                Info("info: speaker conditioning is disabled for this request; ignoring speaker_kv_scale.");
+            }
+            else if (_ditContext is null)
+            {
+                Info("info: speaker_kv_scale needs dit_context.onnx (export again with tools/onnx_export); ignoring.");
+            }
+            else if (!isMeanFlow)
+            {
+                if (kvScale <= 0) throw new ArgumentException("speaker_kv_scale must be > 0.");
+                double minT = req.SpeakerKvMinT ?? 0.9;
+                if (minT is < 0 or > 1) throw new ArgumentException("speaker_kv_min_t must be in [0, 1].");
+                speakerKv = (kvScale, minT, req.SpeakerKvMaxLayers);
+            }
+        }
 
         // ---------------------------------------------------------------- text / caption
-        var (ids, mask) = _tokenizer.BatchEncode(Enumerable.Repeat(text, batch).ToList(), textMaxLen);
+        var (ids, mask) = _tokenizer.BatchEncode(Enumerable.Repeat(text, batch).ToList(), textMaxLen, padToLongest: true);
+        int textLen = ids.GetLength(1);
         var textIds = ids.Cast<long>().ToArray();
         var textMask = mask.Cast<bool>().ToArray();
         var encInputs = new Dictionary<string, OrtValue>
         {
-            ["text_embeds"] = OrtHelpers.Float(Embed(textIds), new long[] { batch, textMaxLen, _embedDim }),
-            ["text_mask"] = OrtHelpers.MaskAs(_text, "text_mask", textMask, new long[] { batch, textMaxLen }),
+            ["text_embeds"] = OrtHelpers.Float(Embed(textIds), new long[] { batch, textLen, _embedDim }),
+            ["text_mask"] = OrtHelpers.MaskAs(_text, "text_mask", textMask, new long[] { batch, textLen }),
         };
         bool[]? captionMask = null;
+        int captionLen = 0;
         if (cfg.UseCaptionCondition)
         {
             var captionText = req.Caption?.Trim() ?? "";
-            var (cIds, cMask) = _captionTokenizer!.BatchEncode(Enumerable.Repeat(captionText, batch).ToList(), captionMaxLen);
-            captionMask = captionText.Length == 0 ? new bool[batch * captionMaxLen] : cMask.Cast<bool>().ToArray();
-            encInputs["caption_embeds"] = OrtHelpers.Float(Embed(cIds.Cast<long>().ToArray()), new long[] { batch, captionMaxLen, _embedDim });
-            encInputs["caption_mask"] = OrtHelpers.MaskAs(_text, "caption_mask", captionMask, new long[] { batch, captionMaxLen });
+            var (cIds, cMask) = _captionTokenizer!.BatchEncode(Enumerable.Repeat(captionText, batch).ToList(), captionMaxLen, padToLongest: true);
+            captionLen = cIds.GetLength(1);
+            captionMask = captionText.Length == 0 ? new bool[batch * captionLen] : cMask.Cast<bool>().ToArray();
+            encInputs["caption_embeds"] = OrtHelpers.Float(Embed(cIds.Cast<long>().ToArray()), new long[] { batch, captionLen, _embedDim });
+            encInputs["caption_mask"] = OrtHelpers.MaskAs(_text, "caption_mask", captionMask, new long[] { batch, captionLen });
         }
         var encOut = cfg.UseCaptionCondition
             ? OrtHelpers.Run(_text, encInputs, "text_state", "caption_state")
@@ -373,14 +404,14 @@ public sealed class OnnxInferenceRuntime : IDisposable
             var feats = new float[batch * DurationFeatures.FeatureDim];
             for (int b = 0; b < batch; b++)
             {
-                int tokens = textMask.Skip(b * textMaxLen).Take(textMaxLen).Count(x => x);
+                int tokens = textMask.Skip(b * textLen).Take(textLen).Count(x => x);
                 DurationFeatures.Build(text, tokens, textMaxLen, hasSpeaker[b]).CopyTo(feats, b * DurationFeatures.FeatureDim);
             }
             var spState = speaker?.State ?? new HostTensor(new float[batch * cfg.SpeakerDim], new long[] { batch, 1, cfg.SpeakerDim });
             var dIn = new Dictionary<string, OrtValue>
             {
                 ["text_state"] = OrtHelpers.Float(textState.Data, textState.Shape),
-                ["text_mask"] = OrtHelpers.MaskAs(_duration, "text_mask", textMask, new long[] { batch, textMaxLen }),
+                ["text_mask"] = OrtHelpers.MaskAs(_duration, "text_mask", textMask, new long[] { batch, textLen }),
                 ["features"] = OrtHelpers.Float(feats, new long[] { batch, DurationFeatures.FeatureDim }),
                 ["speaker_state"] = OrtHelpers.Float(spState.Data, spState.Shape),
                 ["has_speaker"] = OrtHelpers.MaskAs(_duration, "has_speaker", hasSpeaker, new long[] { batch }),
@@ -388,7 +419,7 @@ public sealed class OnnxInferenceRuntime : IDisposable
             if (captionState is not null)
             {
                 dIn["caption_state"] = OrtHelpers.Float(captionState.Data, captionState.Shape);
-                dIn["caption_mask"] = OrtHelpers.MaskAs(_duration, "caption_mask", captionMask!, new long[] { batch, captionMaxLen });
+                dIn["caption_mask"] = OrtHelpers.MaskAs(_duration, "caption_mask", captionMask!, new long[] { batch, captionLen });
                 dIn["has_caption"] = OrtHelpers.MaskAs(_duration, "has_caption", Enumerable.Repeat(hasCaptionText, batch).ToArray(), new long[] { batch });
             }
             var logFrames = OrtHelpers.Run(_duration, dIn, "log_frames")[0].Data;
@@ -416,10 +447,10 @@ public sealed class OnnxInferenceRuntime : IDisposable
 
         // ---------------------------------------------------------------- sampling
         var cond = new Conditions(textState, textMask, speaker?.State, speaker?.Mask, captionState, captionMask);
-        var sampler = new ArraySampler(_dit, cfg, seed, _noise);
+        var sampler = new ArraySampler(_dit, _ditContext, cfg, seed, _noise);
         float[] z = isMeanFlow
             ? sampler.SampleMeanFlow(cond, batch, seqLen, numSteps)
-            : sampler.SampleRf(cond, batch, seqLen, req, numSteps, hasCaptionText, messages);
+            : sampler.SampleRf(cond, batch, seqLen, req, numSteps, hasCaptionText, messages, speakerKv);
         Stage(isMeanFlow ? "sample_meanflow" : "sample_rf");
 
         // ---------------------------------------------------------------- decode
@@ -500,6 +531,7 @@ public sealed class OnnxInferenceRuntime : IDisposable
         _duration?.Dispose();
         _encoder?.Dispose();
         _dit.Dispose();
+        _ditContext?.Dispose();
         _decoder.Dispose();
     }
 }

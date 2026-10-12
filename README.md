@@ -316,7 +316,7 @@ NVIDIA GPU では TorchSharp CUDA のほうが大幅に速いので、自動選�
   書き出しスクリプトはマスクをスコアに足し込む形で書き出すので、`IsNaN` は入りません（Irodori のマスクは、結果に使う行には必ず有効なキーが残ります）
 - 効果: DiT の 1 ステップ 225 ms → 103 ms。合計は MeanFlow 版 3.7 秒 → 2.5 秒、通常版（RF, DiT fp16）33〜43 秒 → 14 秒、
   CPU 実行（MeanFlow 版）18.2 秒 → 15.8 秒。音声は修正前とほぼ同じです（MeanFlow 版で SNR 79 dB）
-- **以前に書き出したモデルフォルダには効きません。** `export_onnx.py --only text_encoder speaker_encoder duration dit_step` で書き出し直してください。
+- **以前に書き出したモデルフォルダには効きません。** `export_onnx.py --only text_encoder speaker_encoder duration dit_context dit_step_kv` で書き出し直してください。
   `IsNaN` が残っていると、書き出し時に `[warn]` を表示します
 
 メモリと CPU（MeanFlow 版、17.5 秒の音声、WebGPU / RTX 4050 での実測）:
@@ -328,11 +328,31 @@ NVIDIA GPU では TorchSharp CUDA のほうが大幅に速いので、自動選�
 - ONNX Runtime のスレッドは、仕事を待つ間に空回りしない設定にしています。CPU 使用率は WebGPU で 10% → 2%、
   CPU 実行では 71% → 35% に下がり、CPU 実行は 22.4 秒から 16.3 秒に速くなりました
 
+テキストの詰め物と文脈の K/V（17.5 秒の音声、参照音声 + キャプション、WebGPU / RTX 4050 での実測、2 回目以降）:
+
+- Python 版はテキストとキャプションを `max_text_len`（256）まで詰め物で埋め、DiT は毎ステップその詰め物にもアテンションを
+  計算します。C# 版は最も長い行の長さまでしか埋めません（切り詰めは `max_text_len` のまま）。詰め物はマスクで
+  アテンションから外れるので、有効な位置の結果は変わりません（TorchSharp CPU fp32 で切り詰めの有無を比べて SNR 99 dB）。
+  書き出し直しは不要で、TorchSharp 版にも効きます
+  - ONNX 通常版（RF, DiT fp16）の DiT: 12.1 秒 → 8.0 秒、MeanFlow 版: 0.54 秒 → 0.40 秒
+  - TorchSharp CPU（通常版、5 秒の音声）: 44.1 秒 → 33.5 秒
+  - fp16 の通常版は 40 ステップで丸め差が広がるため波形は一致しませんが、メルスペクトルの差（対数の平均絶対差）は 0.43 で、
+    シードを変えたときの 4.8 よりずっと小さく、同じ発話です
+- 文脈（テキスト・話者・キャプション）の K/V は `x_t` と `t` によらないので、Python 版は 1 回だけ計算して使い回します
+  （`build_context_kv_cache`）。以前の `dit_step.onnx` は毎ステップ全層で計算し直していたので、書き出しを
+  `dit_context.onnx`（K/V を計算）と `dit_step_kv.onnx`（K/V を受け取る 1 ステップ）に分けました。
+  K/V は GPU に置いたまま（IOBinding）各ステップに渡します。音声は分ける前とビット単位で同じです
+  - DiT: 通常版 7.9 秒 → 7.6 秒、MeanFlow 版 0.40 秒 → 0.38 秒、CPU 実行（MeanFlow 版）2.8 秒 → 2.5 秒
+  - `SpeakerKvScale` / `SpeakerKvMinT` / `SpeakerKvMaxLayers` に対応しました（話者の K/V に掛ける係数を `dit_context.onnx` に渡します）。
+    TorchSharp 版と同じ初期ノイズで比べたメルスペクトルの差は、指定なしで 0.025、`SpeakerKvScale=1.5` で 0.032 です
+  - `dit_step.onnx` しかない以前のモデルフォルダもそのまま動きます（`SpeakerKvScale` は無視）。
+    `export_onnx.py --only dit_context dit_step_kv` で書き出すと新しい形になります
+
 ONNX 版の制限:
 
 - 初期ノイズは独自の乱数生成器で作るため、同じシードでも TorchSharp 版・Python 版とは別の音声になります
   （`OnnxRuntimeOptions.NoiseGenerator` で外部のノイズを与えることはできます）
-- `RefLatents`（`.pt` の参照潜在）と `SpeakerKvScale` は未対応です
+- `RefLatents`（`.pt` の参照潜在）は未対応です。`SpeakerKvScale` は `dit_context.onnx` のある（新しく書き出した）モデルフォルダでのみ使えます
 - v4 系（ModernBERT を使うチェックポイント）のみ対応です
 - DirectML は検証時に実行時エラーとなったため対応していません（DirectML 自体も機能追加が止まっています）
 - AMD の GPU は手元に実機がなく、動作は未確認です（この PC の NVIDIA と Intel の GPU では WebGPU 経由で確認済み）

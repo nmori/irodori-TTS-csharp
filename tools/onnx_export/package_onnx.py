@@ -42,7 +42,7 @@ irodori-tts-server (Irodori-TTS の C# 版) が ONNX Runtime + WebGPU / CPU で�
 中身は次のモデルの重みを ONNX 形式に変換したものです (tools/onnx_export/export_onnx.py, {tool})。
 重みの値は変えていません。
 
-  * dit_step, duration, speaker_encoder
+  * dit_context, dit_step_kv (以前の書き出しでは dit_step), duration, speaker_encoder
       元: {model} (Aratako)
       MIT License -> Irodori-TTS_MIT.txt
       https://huggingface.co/{model}

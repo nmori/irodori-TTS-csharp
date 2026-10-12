@@ -40,7 +40,12 @@ public sealed class TextTokenizer
     /// Tokenize, truncate and right-pad to <paramref name="maxLength"/>.
     /// Returns row-major <c>ids[batch, maxLength]</c> and <c>mask[batch, maxLength]</c>.
     /// </summary>
-    public (long[,] Ids, bool[,] Mask) BatchEncode(IReadOnlyList<string> texts, int? maxLength = null)
+    /// <param name="padToLongest">
+    /// Truncate at <paramref name="maxLength"/> but pad only to the longest row (at least <paramref name="minLength"/>).
+    /// Every consumer masks padded keys out of attention and pooling, so the valid positions are unchanged while
+    /// the encoders and every DiT step stop attending over up to <paramref name="maxLength"/> padding tokens.
+    /// </param>
+    public (long[,] Ids, bool[,] Mask) BatchEncode(IReadOnlyList<string> texts, int? maxLength = null, bool padToLongest = false, int minLength = 2)
     {
         if (texts.Count == 0)
         {
@@ -50,6 +55,11 @@ public sealed class TextTokenizer
         if (maxLen <= 0)
         {
             throw new ArgumentOutOfRangeException(nameof(maxLength), $"max_length must be > 0, got {maxLen}");
+        }
+        if (padToLongest && maxLength is not null)
+        {
+            int longest = texts.Max(t => t.Length == 0 ? (AddBos ? 1 : 0) : Encode(t).Count);
+            maxLen = Math.Min(maxLen, Math.Max(longest, minLength));
         }
         var ids = new long[texts.Count, maxLen];
         var mask = new bool[texts.Count, maxLen];

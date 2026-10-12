@@ -12,7 +12,9 @@ Output directory layout (what IrodoriTts.Onnx expects):
     text_encoder.onnx            ModernBERT + text (+ caption) projector + norm      (fp32)
     speaker_encoder.onnx         patched reference latent -> speaker state            (fp32)
     duration.onnx                duration predictor                                   (fp32)
-    dit_step.onnx                one velocity evaluation of the DiT  (fp32 for MeanFlow, fp16 for RF by default)
+    dit_context.onnx             per-layer conditioning K/V of the DiT, once per request (same precision as dit_step_kv)
+    dit_step_kv.onnx             one velocity evaluation over those K/V  (fp32 for MeanFlow, fp16 for RF by default)
+    dit_step.onnx                legacy single-graph step (only with --legacy-dit-step)
     dacvae_encoder.onnx          waveform -> posterior-mean latent                    (fp32)
     dacvae_decoder.onnx          latent -> waveform                                   (fp32)
 
@@ -140,9 +142,11 @@ def main() -> None:
     ap.add_argument("--out", required=True)
     ap.add_argument("--dit-precision", choices=["auto", "fp16", "fp32"], default="auto",
                     help="auto: fp32 for MeanFlow checkpoints (4 steps, exact), fp16 for RF checkpoints (40 steps, faster)")
+    ap.add_argument("--legacy-dit-step", action="store_true",
+                    help="Also export dit_step.onnx (projects the context K/V in every step; for older runtimes)")
     ap.add_argument("--opset", type=int, default=20)
     ap.add_argument("--only", nargs="*", default=None,
-                    help="Export only these graphs (text_encoder speaker_encoder duration dit_step dacvae_decoder dacvae_encoder)")
+                    help="Export only these graphs (text_encoder speaker_encoder duration dit_context dit_step_kv dit_step dacvae_decoder dacvae_encoder)")
     args = ap.parse_args()
     sys.path.insert(0, args.irodori_repo)
 
@@ -259,7 +263,7 @@ def main() -> None:
         import onnx
         graph = onnx.load(str(out / f"{name}.onnx"), load_external_data=False).graph
         for inp in graph.input:
-            for axis in (dyn or {}).get(inp.name, {}):
+            for axis in (dyn or {}).get(inp.name) or {}:
                 d = inp.type.tensor_type.shape.dim[axis]
                 if not d.dim_param:
                     raise SystemExit(f"{name}: input '{inp.name}' axis {axis} was exported as static size {d.dim_value}.")
@@ -388,7 +392,105 @@ def main() -> None:
         dit_in.append(torch.tensor([0.25, 0.25]))
         names.append("delta_t")
         dyn["delta_t"] = {0: B}
-    export(DiTStep().eval(), tuple(dit_in), names, ["v"], dyn, "dit_step")
+    if args.legacy_dit_step:
+        export(DiTStep().eval(), tuple(dit_in), names, ["v"], dyn, "dit_step")
+
+    # ---------------------------------------------------------------- DiT context K/V + step over cached K/V
+    # The conditioning K/V projections do not depend on x_t or t, so Python computes them once per request
+    # (build_context_kv_cache). dit_step.onnx recomputed them in every layer of every step; split them out:
+    #   dit_context.onnx : states -> per-layer K/V of the concatenated context (text[, speaker][, caption])
+    #   dit_step_kv.onnx : one velocity evaluation that attends over those K/V
+    # The runtime keeps the K/V on the GPU between steps (IOBinding).
+    att0 = model.blocks[0].attention
+    has_spk, has_cap = att0.has_speaker_condition, att0.has_caption_condition
+    n_layers = len(model.blocks)
+
+    class DiTContext(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.m = model
+
+        def forward(self, text_state, speaker_state, caption_state, speaker_kv_scale):
+            # speaker_kv_scale: (layers,) multiplier on the speaker K/V of each layer (speaker_kv_scale /
+            # speaker_kv_max_layers in Python); ones leave the projections untouched.
+            ks, vs = [], []
+            for i, blk in enumerate(self.m.blocks):
+                p = blk.attention.project_context_kv(text_context=text_state,
+                                                     speaker_context=speaker_state if has_spk else None,
+                                                     caption_context=caption_state if has_cap else None)
+                k_parts, v_parts, o = [p[0]], [p[1]], 2
+                if has_spk:
+                    s = speaker_kv_scale[i].to(p[o].dtype)
+                    k_parts.append(p[o] * s)
+                    v_parts.append(p[o + 1] * s)
+                    o += 2
+                if has_cap:
+                    k_parts.append(p[o])
+                    v_parts.append(p[o + 1])
+                ks.append(torch.cat(k_parts, dim=1))
+                vs.append(torch.cat(v_parts, dim=1))
+            return torch.stack(ks), torch.stack(vs)  # (layers, B, S_ctx, H, Dh)
+
+    def attention_over_cache(att, x, k_ctx, v_ctx, freqs, plan):
+        # JointAttention.forward with the projected context already concatenated in kv order.
+        bsz, seq_len, _ = x.shape
+        q = att.q_norm(att.wq(x).reshape(bsz, seq_len, att.heads, att.head_dim))
+        k_self = att.k_norm(att.wk(x).reshape(bsz, seq_len, att.heads, att.head_dim))
+        v_self = att.wv(x).reshape(bsz, seq_len, att.heads, att.head_dim)
+        q = att._apply_rotary_half(q, freqs[:seq_len])
+        k_self = att._apply_rotary_half(k_self, freqs[:seq_len])
+        k = torch.cat([k_self, k_ctx], dim=1)
+        v = torch.cat([v_self, v_ctx], dim=1)
+        y = M.context_attention(q, k, v, plan).reshape(bsz, seq_len, att.dim)
+        return att.wo(y * torch.sigmoid(att.gate(x)))
+
+    class DiTStepKV(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.m = model
+
+        def forward(self, x_t, t, context_mask, k_context, v_context, delta_t=None):
+            m = self.m
+            cond = m.cond_module(M.get_timestep_embedding(t, cfg.timestep_embed_dim).to(dtype=x_t.dtype))
+            if m.delta_cond_module is not None:
+                cond = cond + m.delta_cond_module(M.get_timestep_embedding(delta_t, cfg.timestep_embed_dim).to(dtype=x_t.dtype))
+            cond = cond[:, None, :]
+            x = m.in_proj(x_t)
+            freqs = m._rope_freqs(x.shape[1], x.device)
+            self_mask = torch.ones_like(x[:, :, 0], dtype=torch.bool)
+            plan = M.ContextAttentionPlan(kv_mask=torch.cat([self_mask, context_mask.to(torch.bool)], dim=1),
+                                          query_len=x.shape[1], use_fa3=False)
+            for i, blk in enumerate(m.blocks):
+                h, gate = blk.attention_adaln(x, cond)
+                x = x + gate * attention_over_cache(blk.attention, h, k_context[i], v_context[i], freqs, plan)
+                h, gate = blk.mlp_adaln(x, cond)
+                x = x + gate * blk.mlp(h)
+            return m.out_proj(m.out_norm(x)).to(dtype=x_t.dtype)
+
+    kv_scale = torch.ones(n_layers)
+    ctx_in = (dit_in[2], dit_in[4], dit_in[6], kv_scale)
+    cmask_all = [dit_in[3]] + ([dit_in[5]] if has_spk else []) + ([dit_in[7]] if has_cap else [])
+    with torch.inference_mode():
+        kc, vc = DiTContext().eval()(*ctx_in)
+        step_in = [dit_in[0], dit_in[1], torch.cat(cmask_all, dim=1), kc, vc] + ([dit_in[8]] if meanflow else [])
+        # The split graphs must reproduce the single-step forward.
+        ref = DiTStep().eval()(*dit_in)
+        got = DiTStepKV().eval()(*step_in)
+        err = (ref.float() - got.float()).abs().max().item()
+        print(f"[check] dit_step_kv vs forward_with_encoded_conditions: max abs diff {err:.3e}", flush=True)
+        if not err < (5e-2 if dit_dtype == torch.float16 else 1e-3):
+            raise SystemExit("dit_step_kv does not match the reference forward.")
+    Ctx = D("ctx_len", min=2, max=8192)
+    export(DiTContext().eval(), ctx_in, ["text_state", "speaker_state", "caption_state", "speaker_kv_scale"],
+           ["k_context", "v_context"],
+           {"text_state": {0: B, 1: T3}, "speaker_state": {0: B, 1: S3}, "caption_state": {0: B, 1: C3}, "speaker_kv_scale": None},
+           "dit_context")
+    step_names = ["x_t", "t", "context_mask", "k_context", "v_context"] + (["delta_t"] if meanflow else [])
+    step_dyn = {"x_t": {0: B, 1: Fr}, "t": {0: B}, "context_mask": {0: B, 1: Ctx},
+                "k_context": {1: B, 2: Ctx}, "v_context": {1: B, 2: Ctx}}
+    if meanflow:
+        step_dyn["delta_t"] = {0: B}
+    export(DiTStepKV().eval(), tuple(step_in), step_names, ["v"], step_dyn, "dit_step_kv")
     model.float()
 
     # ---------------------------------------------------------------- DACVAE

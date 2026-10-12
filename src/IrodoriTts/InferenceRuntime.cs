@@ -494,14 +494,14 @@ public sealed class InferenceRuntime : IDisposable
         }
 
         var texts = Enumerable.Repeat(normalizedText, numCandidates).ToList();
-        var (ids, mask) = _tokenizer.BatchEncode(texts, textMaxLen);
+        var (ids, mask) = _tokenizer.BatchEncode(texts, textMaxLen, padToLongest: true);
         var textIds = ToTensor(ids).to(_modelDevice);
         var textMask = ToTensor(mask).to(_modelDevice);
         Tensor? captionIds = null, captionMask = null;
         if (cfg.UseCaptionCondition)
         {
             var captionText = req.Caption?.Trim() ?? "";
-            var (cIds, cMask) = _captionTokenizer!.BatchEncode(Enumerable.Repeat(captionText, numCandidates).ToList(), captionMaxLen);
+            var (cIds, cMask) = _captionTokenizer!.BatchEncode(Enumerable.Repeat(captionText, numCandidates).ToList(), captionMaxLen, padToLongest: true);
             captionIds = ToTensor(cIds).to(_modelDevice);
             captionMask = ToTensor(cMask).to(_modelDevice);
             if (captionText.Length == 0) captionMask = torch.zeros_like(captionMask);

@@ -182,6 +182,32 @@ internal static class OrtHelpers
         return list;
     }
 
+    /// <summary>
+    /// Run and leave the outputs where the session produced them (GPU memory on WebGPU), so they can be fed to
+    /// another session on the same device without a round trip through the CPU. The caller owns the result.
+    /// </summary>
+    public static IDisposableReadOnlyCollection<OrtValue> RunOnDevice(InferenceSession session, IReadOnlyDictionary<string, OrtValue> inputs, params string[] outputs)
+    {
+        using var binding = session.CreateIoBinding();
+        foreach (var name in session.InputMetadata.Keys)
+        {
+            binding.BindInput(name, inputs.TryGetValue(name, out var v) ? v : throw new InvalidOperationException($"Missing ONNX input '{name}'."));
+        }
+        using (var infos = session.GetMemoryInfosForOutputs())
+        {
+            var names = session.OutputNames;
+            foreach (var name in outputs)
+            {
+                int i = names.ToList().IndexOf(name);
+                if (i < 0) throw new InvalidOperationException($"Missing ONNX output '{name}'.");
+                binding.BindOutputToDevice(name, infos[i]);
+            }
+        }
+        using var runOptions = new RunOptions();
+        session.RunWithBinding(runOptions, binding);
+        return binding.GetOutputValues();
+    }
+
     private static float[] ToFloat(ReadOnlySpan<Float16> src)
     {
         var dst = new float[src.Length];

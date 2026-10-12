@@ -59,6 +59,32 @@ public class TextProcessingTests
     }
 
     [Fact]
+    public void PadToLongestKeepsTheValidPrefix()
+    {
+        var dir = FindTokenizerDirectory();
+        Assert.SkipWhen(dir is null, "tokenizer.json not found (see TokenizerMatchesPython).");
+        var tokenizer = new TextTokenizer(UnigramTokenizer.FromDirectory(dir!), addBos: true);
+        var texts = new[] { "今日は良い天気ですね。", "こんにちは。" };
+        var (fullIds, fullMask) = tokenizer.BatchEncode(texts, 256);
+        var (ids, mask) = tokenizer.BatchEncode(texts, 256, padToLongest: true);
+        int longest = texts.Max(t => tokenizer.Encode(t).Count);
+        Assert.Equal(longest, ids.GetLength(1));
+        for (int b = 0; b < texts.Length; b++)
+        {
+            for (int j = 0; j < longest; j++)
+            {
+                Assert.Equal(fullIds[b, j], ids[b, j]);
+                Assert.Equal(fullMask[b, j], mask[b, j]);
+            }
+            for (int j = longest; j < 256; j++) Assert.False(fullMask[b, j]);
+        }
+
+        // Truncation still happens at maxLength; an empty caption keeps the minimum width.
+        Assert.Equal(4, tokenizer.BatchEncode(texts, 4, padToLongest: true).Ids.GetLength(1));
+        Assert.Equal(2, tokenizer.BatchEncode(new[] { "" }, 256, padToLongest: true).Ids.GetLength(1));
+    }
+
+    [Fact]
     public void StripOuterBracketsOnlyRemovesEnclosingPairs()
     {
         Assert.Equal("テスト", TextNormalizer.StripOuterBrackets("「（テスト）」"));
