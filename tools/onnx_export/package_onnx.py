@@ -50,7 +50,7 @@ irodori-tts-server (Irodori-TTS の C# 版) が ONNX Runtime + WebGPU / CPU で�
       元: sbintuitions/modernbert-ja-310m (SB Intuitions) と {model} の射影層 (Aratako)
       MIT License -> modernbert-ja-310m_MIT.txt, Irodori-TTS_MIT.txt
       https://huggingface.co/sbintuitions/modernbert-ja-310m
-  * dacvae_decoder, dacvae_encoder
+  * dacvae_decoder, dacvae_decoder_fp16, dacvae_encoder
       元: Aratako/Semantic-DACVAE-Japanese-32dim (Aratako, MIT License -> Irodori-TTS_MIT.txt)
           さらにその元: facebook/dacvae-watermarked (Meta, Apache License 2.0 -> DACVAE_Apache-2.0.txt)
       https://huggingface.co/Aratako/Semantic-DACVAE-Japanese-32dim
