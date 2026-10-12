@@ -46,3 +46,22 @@ ONNX Runtime 1.30 + WebGPU EP 0.4.0 では、次の状況でエラーメッセ�
 - bool のグラフ入出力が CPU と GPU の両方の演算から使われる → 入出力のマスクは int32（0/1）で受け渡し
 - 315 MB の単語埋め込み表に対する `Gather`（GPU のバッファ上限超過）→ 埋め込みはグラフ外（C#）で参照
 - `int(query_len)` による可変長軸の固定化 → 書き出し後に可変長のはずの軸が固定されていないか検査
+- マスク付きアテンションの `IsNaN`（全部マスクされた行を 0 にする処理）→ WebGPU にないため層ごとに CPU と往復していた。
+  マスクをスコアに足し込む形で書き出す（DiT 1 ステップ 225 ms → 103 ms）。`IsNaN` が残ると書き出し時に `[warn]` を表示
+
+## 配布用のパッケージ（package_onnx.py）
+
+書き出したフォルダを、サーバーが取得する形（分割 ZIP + 一覧の JSON）にまとめます。
+
+```bash
+python package_onnx.py --model-dir D:\models\irodori-v4.1-small-mf-onnx --out D:\models\upload \
+    --id irodori-v4.1-small-mf --version 20261012 --base-url https://machanbazaar.com/model/
+```
+
+- `--out` に `<フォルダ名>-<版>.zip.001`〜（既定 200 MiB ずつ）と `irodori-onnx.json` を作ります。すべて `--base-url` の場所へ置きます
+- ZIP の中は `<フォルダ名>/` にモデル一式、`<フォルダ名>/LICENSES/` に README.txt（元のモデル・ライセンス・倫理上の注意）と
+  `licenses/` のライセンス本文（MIT: Aratako, SB Intuitions / Apache-2.0: Meta の DACVAE）
+- ZIP の分割はバイト単位なので、つなげれば普通の ZIP です（`copy /b a.zip.001 + a.zip.002 ... a.zip`、または 7-Zip で `.001` を開く）
+- 同じフォルダからは同じバイト列になります（項目の順番と日時を固定）。分割ファイルをつないだときのハッシュと CRC は作成時に確かめます
+- `irodori-onnx.json` が `--out` にあれば、同じ `--id` の項目だけを置き換えます。一覧は毎回同じ URL に上書きしてください
+  （版を変えた分割ファイルは別名になるので、古い版を使っている途中の取得を壊しません）
