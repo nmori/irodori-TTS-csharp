@@ -140,36 +140,51 @@ public static class WavFile
     {
         int channels = samples.Length;
         int frames = samples[0].Length;
-        int dataSize = frames * channels * 2;
-        using var bw = new BinaryWriter(stream, Encoding.ASCII, leaveOpen: true);
-        bw.Write(Encoding.ASCII.GetBytes("RIFF"));
-        bw.Write(36 + dataSize);
-        bw.Write(Encoding.ASCII.GetBytes("WAVE"));
-        bw.Write(Encoding.ASCII.GetBytes("fmt "));
-        bw.Write(16);
-        bw.Write((short)1);
-        bw.Write((short)channels);
-        bw.Write(sampleRate);
-        bw.Write(sampleRate * channels * 2);
-        bw.Write((short)(channels * 2));
-        bw.Write((short)16);
-        bw.Write(Encoding.ASCII.GetBytes("data"));
-        bw.Write(dataSize);
-        var buf = new byte[dataSize];
+        stream.Write(Pcm16Header(frames, channels, sampleRate));
+        var buf = new byte[frames * channels * 2];
         int o = 0;
         for (int i = 0; i < frames; i++)
         {
             for (int c = 0; c < channels; c++)
             {
-                // libsndfile-style float -> PCM16 conversion (clip, scale by 0x7FFF, round).
-                float v = Math.Clamp(samples[c][i], -1f, 1f);
-                short q = (short)MathF.Round(v * 32767f);
-                BinaryPrimitives.WriteInt16LittleEndian(buf.AsSpan(o, 2), q);
+                BinaryPrimitives.WriteInt16LittleEndian(buf.AsSpan(o, 2), ToPcm16(samples[c][i]));
                 o += 2;
             }
         }
-        bw.Write(buf);
+        stream.Write(buf);
     }
+
+    /// <summary>The 44-byte header of a 16-bit PCM WAV file with <paramref name="frames"/> sample frames.</summary>
+    public static byte[] Pcm16Header(long frames, int channels, int sampleRate)
+    {
+        long dataSize = frames * channels * 2;
+        if (dataSize > uint.MaxValue - 36) throw new ArgumentOutOfRangeException(nameof(frames), "Too long for a WAV file.");
+        var h = new byte[44];
+        Encoding.ASCII.GetBytes("RIFF").CopyTo(h, 0);
+        BinaryPrimitives.WriteUInt32LittleEndian(h.AsSpan(4), (uint)(36 + dataSize));
+        Encoding.ASCII.GetBytes("WAVEfmt ").CopyTo(h, 8);
+        BinaryPrimitives.WriteInt32LittleEndian(h.AsSpan(16), 16);
+        BinaryPrimitives.WriteInt16LittleEndian(h.AsSpan(20), 1);
+        BinaryPrimitives.WriteInt16LittleEndian(h.AsSpan(22), (short)channels);
+        BinaryPrimitives.WriteInt32LittleEndian(h.AsSpan(24), sampleRate);
+        BinaryPrimitives.WriteInt32LittleEndian(h.AsSpan(28), sampleRate * channels * 2);
+        BinaryPrimitives.WriteInt16LittleEndian(h.AsSpan(32), (short)(channels * 2));
+        BinaryPrimitives.WriteInt16LittleEndian(h.AsSpan(34), 16);
+        Encoding.ASCII.GetBytes("data").CopyTo(h, 36);
+        BinaryPrimitives.WriteUInt32LittleEndian(h.AsSpan(40), (uint)dataSize);
+        return h;
+    }
+
+    /// <summary>Mono samples as little-endian 16-bit PCM (no header).</summary>
+    public static byte[] ToPcm16Bytes(ReadOnlySpan<float> samples)
+    {
+        var buf = new byte[samples.Length * 2];
+        for (int i = 0; i < samples.Length; i++) BinaryPrimitives.WriteInt16LittleEndian(buf.AsSpan(2 * i, 2), ToPcm16(samples[i]));
+        return buf;
+    }
+
+    /// <summary>libsndfile-style float → PCM16 conversion (clip, scale by 0x7FFF, round).</summary>
+    private static short ToPcm16(float v) => (short)MathF.Round(Math.Clamp(v, -1f, 1f) * 32767f);
 
     /// <summary>Write mono or multi-channel float audio as 32-bit IEEE float.</summary>
     public static void WriteFloat32(string path, float[][] samples, int sampleRate)

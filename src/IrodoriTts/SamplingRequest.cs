@@ -6,6 +6,14 @@ namespace IrodoriTts;
 public sealed class SamplingRequest
 {
     public required string Text { get; set; }
+
+    /// <summary>
+    /// Receives the first candidate's final audio piece by piece while it is decoded, in order and without gaps,
+    /// on the synthesizing thread (before <c>Synthesize</c> returns). The pieces concatenate to
+    /// <see cref="SamplingResult.Audio"/>. Runtimes that do not stream never call it.
+    /// </summary>
+    public Action<AudioChunk>? OnAudioChunk { get; set; }
+
     /// <summary>Style / voice-design caption (caption-conditioned checkpoints only).</summary>
     public string? Caption { get; set; }
 
@@ -75,3 +83,9 @@ public sealed class SamplingResult
     public required long UsedSeed { get; init; }
     public required IReadOnlyList<string> Messages { get; init; }
 }
+
+/// <summary>A decoded piece of audio (see <see cref="SamplingRequest.OnAudioChunk"/>).</summary>
+/// <param name="Samples">Mono samples of this piece.</param>
+/// <param name="Offset">Index of the first sample of this piece in the whole utterance.</param>
+/// <param name="TotalSamples">Length of the whole utterance (known before decoding starts).</param>
+public sealed record AudioChunk(float[] Samples, long Offset, long TotalSamples, int SampleRate, long Seed);

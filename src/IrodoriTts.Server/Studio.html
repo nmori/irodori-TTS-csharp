@@ -84,11 +84,66 @@ async function api(path, init) {
   return r;
 }
 
-async function synthesize(text, voice, seed) {
+// The server streams the WAV while it decodes; with live=true the audio starts playing as it arrives
+// (Web Audio), then the whole file is returned for the player and for saving.
+let audioCtx = null;
+function unlockAudio() {  // call from the click itself: browsers only start audio after a user gesture
+  if (!audioCtx && window.AudioContext) audioCtx = new AudioContext();
+  if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+}
+
+async function synthesize(text, voice, seed, live) {
   const body = { model, input: text, voice, response_format: "wav" };
   if (seed !== undefined) body.irodori = { seed };
   const r = await api("/v1/audio/speech", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  return await r.blob();
+  if (!live || !audioCtx || !r.body) return { blob: await r.blob(), played: false };
+  const reader = r.body.getReader();
+  const parts = [];
+  let header = new Uint8Array(0), carry = null, rate = 0, at = 0;
+  // A slow device (first audio after more than 1.5 s, e.g. the CPU) decodes barely faster than real time:
+  // hold back 3 s of audio before playing so the rest arrives in time. Fast GPUs start at once.
+  const started = performance.now();
+  let leadSeconds = null, pending = [];
+  const play = buffer => {
+    const src = audioCtx.createBufferSource();
+    src.buffer = buffer;
+    src.connect(audioCtx.destination);
+    at = Math.max(at, audioCtx.currentTime + 0.05);
+    src.start(at);
+    at += buffer.duration;
+  };
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(value);
+    let bytes = value;
+    if (header.length < 44) {  // the 44-byte PCM16 header comes first
+      const need = 44 - header.length;
+      const merged = new Uint8Array(header.length + Math.min(need, bytes.length));
+      merged.set(header); merged.set(bytes.subarray(0, need), header.length);
+      header = merged;
+      bytes = bytes.subarray(need);
+      if (header.length < 44) continue;
+      rate = new DataView(header.buffer).getUint32(24, true);
+    }
+    if (carry !== null) {  // a sample split across reads
+      const merged = new Uint8Array(bytes.length + 1);
+      merged[0] = carry; merged.set(bytes, 1);
+      bytes = merged; carry = null;
+    }
+    if (bytes.length % 2) { carry = bytes[bytes.length - 1]; bytes = bytes.subarray(0, bytes.length - 1); }
+    const n = bytes.length / 2;
+    if (n === 0) continue;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.length);
+    const buffer = audioCtx.createBuffer(1, n, rate);
+    const ch = buffer.getChannelData(0);
+    for (let i = 0; i < n; i++) ch[i] = view.getInt16(2 * i, true) / 32768;
+    if (leadSeconds === null) leadSeconds = performance.now() - started > 1500 ? 3 : 0;
+    pending.push(buffer);
+    if (pending.reduce((sum, b) => sum + b.duration, 0) >= leadSeconds) { pending.forEach(play); pending = []; leadSeconds = 0; }
+  }
+  pending.forEach(play);
+  return { blob: new Blob(parts, { type: "audio/wav" }), played: true };
 }
 
 function audioFor(blob, autoplay) {
@@ -107,14 +162,15 @@ async function generate(count) {
   const fixed = $("seed").value.trim();
   const buttons = [$("gen"), $("gen5")];
   buttons.forEach(b => b.disabled = true);
+  unlockAudio();
   const list = $("candidates");
   if (list.querySelector(".empty")) list.innerHTML = "";
   try {
     for (let i = 0; i < count; i++) {
       const seed = fixed !== "" && count === 1 ? Number(fixed) : randomSeed();
       setStatus(`生成中 (${i + 1}/${count}) シード ${seed}`);
-      const blob = await synthesize(text, "none", seed);
-      list.prepend(candidateItem(blob, seed, i === 0));
+      const { blob, played } = await synthesize(text, "none", seed, i === 0);
+      list.prepend(candidateItem(blob, seed, i === 0 && !played));
     }
     setStatus("生成しました。気に入った声に名前を付けて保存してください。");
   } catch (e) {
@@ -201,8 +257,10 @@ function voiceItem(v) {
     if (!text) return;
     play.disabled = true;
     play.classList.add("busy");
+    unlockAudio();
     try {
-      slot.replaceChildren(audioFor(await synthesize(text, v.id), true));
+      const { blob, played } = await synthesize(text, v.id, undefined, true);
+      slot.replaceChildren(audioFor(blob, !played));
     } catch (e) {
       setStatus("試聴に失敗しました: " + e.message);
     } finally {

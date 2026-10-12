@@ -149,5 +149,34 @@ public sealed class DacVaeCodec : IDisposable
         return output;
     }
 
+    /// <summary>
+    /// One utterance's (1, T, D) latents → its first <paramref name="maxSamples"/> samples, decoded pass by pass
+    /// (<see cref="DecodePlan"/>; frames after <paramref name="maxSamples"/> are not decoded). Each pass's kept
+    /// audio is handed to <paramref name="onChunk"/> (sample offset, samples) as soon as it is ready.
+    /// </summary>
+    /// <param name="firstChunkFrames">Size of the first pass (see <see cref="DecodePlan.Build"/>); 0 = <see cref="DecodeChunkFrames"/>.</param>
+    public float[] DecodeStream(Tensor latent, long maxSamples, int firstChunkFrames = 0, Action<long, float[]>? onChunk = null)
+    {
+        if (latent.dim() != 3 || latent.shape[0] != 1) throw new ArgumentException("Expected latent shape (1, T, D).");
+        using var _ = torch.inference_mode();
+        int frames = (int)latent.shape[1];
+        int hop = HopLength;
+        long total = Math.Min(maxSamples, (long)frames * hop);
+        var output = new float[total];
+        var plan = DecodePlan.Build(frames, (int)((total + hop - 1) / hop), DecodeChunkFrames, DecodeContextFrames, firstChunkFrames);
+        foreach (var span in plan)
+        {
+            using var scope = torch.NewDisposeScope();
+            var z = latent[TensorIndex.Colon, TensorIndex.Slice(span.From, span.To)].transpose(1, 2).contiguous().to(Device).to(DType);
+            var audio = _model.Decode(z)[0, 0].to(ScalarType.Float32).cpu();
+            long offset = (long)span.Start * hop;
+            int count = (int)(Math.Min((long)span.End * hop, total) - offset);
+            var piece = audio[TensorIndex.Slice((span.Start - span.From) * (long)hop, (span.Start - span.From) * (long)hop + count)].data<float>().ToArray();
+            Array.Copy(piece, 0, output, offset, count);
+            onChunk?.Invoke(offset, piece);
+        }
+        return output;
+    }
+
     public void Dispose() => _model.Dispose();
 }

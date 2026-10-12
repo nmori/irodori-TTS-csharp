@@ -23,12 +23,35 @@ public sealed class FakeEngine : ISpeechEngine
     /// <summary>Audio length returned for every request (seconds).</summary>
     public double Seconds { get; set; } = 0.5;
 
+    /// <summary>Hand the audio to <see cref="SamplingRequest.OnAudioChunk"/> in this many pieces (0: do not stream).</summary>
+    public int StreamPieces { get; set; }
+
+    /// <summary>Thrown after the first streamed piece.</summary>
+    public Exception? ThrowAfterFirstPiece { get; set; }
+
+    /// <summary>When set, the engine waits for it after the first streamed piece.</summary>
+    public SemaphoreSlim? HoldAfterFirstPiece { get; set; }
+
     public SamplingResult Synthesize(SamplingRequest request)
     {
         lock (Requests) Requests.Add(request);
         if (Throw is not null) throw Throw;
         var audio = new float[(int)(SampleRate * Seconds)];
         for (int i = 0; i < audio.Length; i++) audio[i] = 0.25f * MathF.Sin(2 * MathF.PI * 440 * i / SampleRate);
+        if (StreamPieces > 0 && request.OnAudioChunk is { } onChunk)
+        {
+            long seed = request.Seed ?? 1234;
+            int size = (audio.Length + StreamPieces - 1) / StreamPieces;
+            for (int start = 0, n = 0; start < audio.Length; start += size, n++)
+            {
+                onChunk(new AudioChunk(audio[start..Math.Min(audio.Length, start + size)], start, audio.Length, SampleRate, seed));
+                if (n == 0)
+                {
+                    HoldAfterFirstPiece?.Wait();
+                    if (ThrowAfterFirstPiece is not null) throw ThrowAfterFirstPiece;
+                }
+            }
+        }
         return new SamplingResult
         {
             Audio = audio,

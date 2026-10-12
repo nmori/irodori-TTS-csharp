@@ -200,6 +200,63 @@ public class ServerApiTests
         Assert.NotEqual("RIFF", System.Text.Encoding.ASCII.GetString(bytes, 0, 4));
     }
 
+    [Theory]
+    [InlineData("wav")]
+    [InlineData("pcm")]
+    public async Task Speech_StreamedResponseHasTheSameBytesAsTheWholeOne(string format)
+    {
+        await using var s = await TestServer.StartAsync(prepareVoices: Voices);
+        var body = Speech();
+        body["response_format"] = format;
+        var whole = await (await s.SpeechAsync(body)).Content.ReadAsByteArrayAsync();
+        s.Engine.StreamPieces = 3;
+
+        var r = await s.SpeechAsync(body);
+
+        Assert.Equal(HttpStatusCode.OK, r.StatusCode);
+        Assert.Equal(format == "pcm" ? "audio/pcm" : "audio/wav", r.Content.Headers.ContentType?.MediaType);
+        Assert.Equal("1234", r.Headers.GetValues("X-Irodori-Seed").Single());
+        var streamed = await r.Content.ReadAsByteArrayAsync();
+        Assert.Equal(whole, streamed);
+        Assert.Equal(streamed.Length, r.Content.Headers.ContentLength);
+    }
+
+    [Fact]
+    public async Task Speech_FirstPieceArrivesBeforeSynthesisFinishes()
+    {
+        await using var s = await TestServer.StartAsync(prepareVoices: Voices);
+        s.Engine.StreamPieces = 4;
+        using var hold = new SemaphoreSlim(0);
+        s.Engine.HoldAfterFirstPiece = hold;
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/v1/audio/speech")
+        {
+            Content = new StringContent(Speech().ToJsonString(), System.Text.Encoding.UTF8, "application/json"),
+        };
+
+        using var r = await s.Client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+        var stream = await r.Content.ReadAsStreamAsync();
+        var head = new byte[44 + 2];
+        await stream.ReadExactlyAsync(head);  // the WAV header and audio while the engine is still held
+        Assert.Equal("RIFF", System.Text.Encoding.ASCII.GetString(head, 0, 4));
+        hold.Release();
+        var rest = new MemoryStream();
+        await stream.CopyToAsync(rest);
+        Assert.Equal((int)(FakeEngine.SampleRate * s.Engine.Seconds) * 2, head.Length - 44 + rest.Length);
+    }
+
+    [Fact]
+    public async Task Speech_FailureWhileStreamingCutsTheResponse()
+    {
+        await using var s = await TestServer.StartAsync(prepareVoices: Voices);
+        s.Engine.StreamPieces = 4;
+        s.Engine.ThrowAfterFirstPiece = new InvalidOperationException("decoder failed");
+        await Assert.ThrowsAnyAsync<HttpRequestException>(async () =>
+        {
+            var r = await s.SpeechAsync(Speech());
+            await r.Content.ReadAsByteArrayAsync();
+        });
+    }
+
     public static TheoryData<string, HttpStatusCode, string> BadRequests => new()
     {
         { """{"model":"tts-1","input":"x","voice":"alice"}""", HttpStatusCode.NotFound, "model" },

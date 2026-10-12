@@ -624,7 +624,6 @@ public sealed class InferenceRuntime : IDisposable
         Tensor? batchAudio = req.SequentialDecode ? null : _codec.DecodeLatent(z);
         for (int i = 0; i < numCandidates; i++)
         {
-            var audioI = batchAudio is not null ? batchAudio[i] : _codec.DecodeLatent(z[TensorIndex.Slice(i, i + 1)])[0];
             long maxSamples = targetSamples;
             if (req.TrimTail)
             {
@@ -636,7 +635,17 @@ public sealed class InferenceRuntime : IDisposable
                 long flatteningSamples = (long)flattening * hop;
                 if (flatteningSamples > 0) maxSamples = Math.Min(maxSamples, flatteningSamples);
             }
-            var samples = audioI[0].data<float>().ToArray();
+            if (batchAudio is null)
+            {
+                // The trimmed tail is not decoded; the first candidate can stream (OnAudioChunk).
+                var onChunk = i == 0 ? req.OnAudioChunk : null;
+                long totalSamples = Math.Min(maxSamples, (long)latentSteps * hop);
+                audios.Add(_codec.DecodeStream(z[TensorIndex.Slice(i, i + 1)], maxSamples,
+                    onChunk is null ? 0 : StreamFirstChunkFrames,
+                    onChunk is null ? null : (offset, piece) => onChunk(new AudioChunk(piece, offset, totalSamples, sr, usedSeed))));
+                continue;
+            }
+            var samples = batchAudio[i][0].data<float>().ToArray();
             audios.Add(samples.Length > maxSamples ? samples[..(int)maxSamples] : samples);
         }
         Stage(req.SequentialDecode ? "decode_latent (sequential)" : "decode_latent (batch)");
@@ -655,6 +664,12 @@ public sealed class InferenceRuntime : IDisposable
             Messages = messages,
         };
     }
+
+    /// <summary>
+    /// Latent frames in the first decoder pass when <see cref="SamplingRequest.OnAudioChunk"/> is set
+    /// (25 = 1 s of audio): the first audio is handed out after a short pass instead of a full 4 s one.
+    /// </summary>
+    public int StreamFirstChunkFrames { get; set; } = 25;
 
     public void Dispose()
     {

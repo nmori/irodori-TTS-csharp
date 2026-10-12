@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json.Nodes;
+using System.Threading.Channels;
 using IrodoriTts.Audio;
 using IrodoriTts.Sampling;
 
@@ -295,34 +296,71 @@ public static class ServerApp
                 return Error(400, $"Invalid irodori option: {ex.Message}", param: "irodori");
             }
 
-            SamplingResult result;
+            // The runtime hands out the audio while it decodes (OnAudioChunk): the response starts with the first
+            // piece instead of after the whole utterance. Errors before it (bad input, sampling) still become JSON
+            // errors; a failure after it can only cut the connection.
+            var chunks = Channel.CreateUnbounded<AudioChunk>(new UnboundedChannelOptions { SingleReader = true });
+            req.OnAudioChunk = c => chunks.Writer.TryWrite(c);
             var sw = Stopwatch.StartNew();
+            var work = Task.Run(() => engine.Synthesize(req));
+            _ = work.ContinueWith(t => { _ = t.Exception; chunks.Writer.TryComplete(); }, TaskScheduler.Default);
+            var response = http.HttpContext.Response;
+            var aborted = http.HttpContext.RequestAborted;
+
+            if (!await chunks.Reader.WaitToReadAsync(CancellationToken.None))
+            {
+                // Finished (or failed) without streaming: send it in one piece.
+                SamplingResult result;
+                try
+                {
+                    result = await work;
+                }
+                catch (Exception ex) when (ex is ArgumentException or FileNotFoundException or InvalidDataException or NotSupportedException)
+                {
+                    return Error(400, ex.Message);
+                }
+                LogSpeech(result.Audio.Length, result.SampleRate, result.UsedSeed);
+                SetHeaders(result.UsedSeed, result.SampleRate);
+                if (format == "pcm") return Results.Bytes(WavFile.ToPcm16Bytes(result.Audio), "audio/pcm");
+                using var ms = new MemoryStream();
+                WavFile.WritePcm16(ms, new[] { result.Audio }, result.SampleRate);
+                return Results.Bytes(ms.ToArray(), "audio/wav");
+            }
+
+            chunks.Reader.TryPeek(out var head);
+            SetHeaders(head!.Seed, head.SampleRate);
+            response.ContentType = format == "pcm" ? "audio/pcm" : "audio/wav";
+            response.ContentLength = head.TotalSamples * 2 + (format == "pcm" ? 0 : 44);
             try
             {
-                result = await Task.Run(() => engine.Synthesize(req));
-            }
-            catch (Exception ex) when (ex is ArgumentException or FileNotFoundException or InvalidDataException or NotSupportedException)
-            {
-                return Error(400, ex.Message);
-            }
-            o.Log($"[speech] voice={voiceId ?? "(ref)"} chars={input.Length} audio={result.Audio.Length / (double)result.SampleRate:F2}s took={sw.Elapsed.TotalSeconds:F2}s seed={result.UsedSeed}");
-
-            http.HttpContext.Response.Headers["X-Irodori-Seed"] = result.UsedSeed.ToString(CultureInfo.InvariantCulture);
-            http.HttpContext.Response.Headers["X-Irodori-Sample-Rate"] = result.SampleRate.ToString(CultureInfo.InvariantCulture);
-            if (format == "pcm")
-            {
-                var pcm = new byte[result.Audio.Length * 2];
-                for (int i = 0; i < result.Audio.Length; i++)
+                if (format != "pcm") await response.Body.WriteAsync(WavFile.Pcm16Header(head.TotalSamples, 1, head.SampleRate), aborted);
+                await foreach (var chunk in chunks.Reader.ReadAllAsync(aborted))
                 {
-                    short q = (short)MathF.Round(Math.Clamp(result.Audio[i], -1f, 1f) * 32767f);
-                    pcm[2 * i] = (byte)q;
-                    pcm[2 * i + 1] = (byte)(q >> 8);
+                    await response.Body.WriteAsync(WavFile.ToPcm16Bytes(chunk.Samples), aborted);
+                    await response.Body.FlushAsync(aborted);
                 }
-                return Results.Bytes(pcm, "audio/pcm");
+                await work;
+                LogSpeech(head.TotalSamples, head.SampleRate, head.Seed);
             }
-            using var ms = new MemoryStream();
-            WavFile.WritePcm16(ms, new[] { result.Audio }, result.SampleRate);
-            return Results.Bytes(ms.ToArray(), "audio/wav");
+            catch (OperationCanceledException) when (aborted.IsCancellationRequested)
+            {
+                o.Log($"[speech] client disconnected after {sw.Elapsed.TotalSeconds:F2}s");
+            }
+            catch (Exception ex)
+            {
+                o.Log($"[speech] failed while streaming: {ex.Message}");
+                http.HttpContext.Abort();
+            }
+            return Results.Empty;
+
+            void SetHeaders(long seed, int sampleRate)
+            {
+                response.Headers["X-Irodori-Seed"] = seed.ToString(CultureInfo.InvariantCulture);
+                response.Headers["X-Irodori-Sample-Rate"] = sampleRate.ToString(CultureInfo.InvariantCulture);
+            }
+
+            void LogSpeech(long samples, int sampleRate, long seed) =>
+                o.Log($"[speech] voice={voiceId ?? "(ref)"} chars={input.Length} audio={samples / (double)sampleRate:F2}s took={sw.Elapsed.TotalSeconds:F2}s seed={seed}");
         }
 
         app.MapFallback(() => Error(404, "Not found."));
