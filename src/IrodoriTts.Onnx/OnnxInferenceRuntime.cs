@@ -33,6 +33,12 @@ public sealed class OnnxRuntimeOptions
     public int? CpuThreads { get; init; }
 
     /// <summary>
+    /// Use <c>dacvae_decoder_fp16.onnx</c> when the folder has it: null (default) = on WebGPU only. About 45% faster
+    /// decoding on WebGPU (RTX 4050) with an SNR of ~44 dB against the fp32 decoder; slower on the CPU.
+    /// </summary>
+    public bool? DecoderFp16 { get; init; }
+
+    /// <summary>
     /// Optional source of the initial standard-normal latent noise (seed, count → samples). Lets callers
     /// reproduce the noise of another backend; by default an internal xoshiro256** generator seeded with
     /// the request seed is used.
@@ -123,7 +129,9 @@ public sealed class OnnxInferenceRuntime : IDisposable
         {
             _dit = Open("dit_step", options.Device);
         }
-        _decoder = Open("dacvae_decoder", options.Device);
+        bool fp16 = (options.DecoderFp16 ?? options.Device == OnnxDevice.WebGpu) && File.Exists(Path.Combine(dir, "dacvae_decoder_fp16.onnx"));
+        _decoder = Open(fp16 ? "dacvae_decoder_fp16" : "dacvae_decoder", options.Device);
+        DecoderPrecision = fp16 ? "fp16" : "fp32";
     }
 
     public static OnnxInferenceRuntime Load(OnnxRuntimeOptions options) => new(options);
@@ -136,6 +144,9 @@ public sealed class OnnxInferenceRuntime : IDisposable
     /// for this model (Iris Xe: 21 s vs 9 s for 10 s of audio), so they are not counted.
     /// </summary>
     public static bool HasDiscreteWebGpu() => OrtHelpers.ListWebGpuAdapters().Any(a => a.Discrete);
+
+    /// <summary>"fp16" when <c>dacvae_decoder_fp16.onnx</c> is in use, otherwise "fp32".</summary>
+    public string DecoderPrecision { get; }
 
     /// <summary>Name of the GPU used for the heavy sessions (null on CPU).</summary>
     public string? AdapterDescription { get; }
@@ -495,7 +506,7 @@ public sealed class OnnxInferenceRuntime : IDisposable
     public int DecodeChunkFrames { get; set; } = 100;
 
     /// <summary>Context frames decoded on each side of a chunk and dropped; see <see cref="Codec.DacVaeCodec.DecodeContextFrames"/>.</summary>
-    public int DecodeContextFrames { get; set; } = 12;
+    public int DecodeContextFrames { get; set; } = 8;
 
     /// <summary>Latent frames in the first decoder pass when <see cref="SamplingRequest.OnAudioChunk"/> is set (25 = 1 s).</summary>
     public int StreamFirstChunkFrames { get; set; } = 25;

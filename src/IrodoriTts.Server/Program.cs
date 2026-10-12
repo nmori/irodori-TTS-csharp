@@ -209,7 +209,7 @@ internal static class Args
           --no-warmup                Skip the background warm-up synthesis at start-up on a GPU (the first request is then ~1 s slower)
 
         Engine (same as the irodori-tts CLI):
-          --backend auto|torch|onnx  --onnx-dir <DIR>  --onnx-device webgpu|cpu  --onnx-encoders-on-cpu
+          --backend auto|torch|onnx  --onnx-dir <DIR>  --onnx-device webgpu|cpu  --onnx-encoders-on-cpu  --onnx-decoder-fp32
           --webgpu-power high-performance|low-power
           --checkpoint <PATH> | --hf-checkpoint <REPO>   --codec-weights <PATH> | --codec-repo <REPO>
           --model-device cpu|cuda  --model-precision fp32|bf16|auto (auto: bf16 on CUDA, else fp32)  --codec-device <D>  --codec-precision <P>

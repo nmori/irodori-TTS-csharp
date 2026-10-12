@@ -44,6 +44,7 @@ internal static class Cli
           --onnx-dir <DIR>             Output of tools/onnx_export/export_onnx.py
           --onnx-device <D>            webgpu (default) | cpu
           --onnx-encoders-on-cpu       Run text/speaker encoders on the CPU (saves ~1.5 GB GPU memory)
+          --onnx-decoder-fp32          Do not use dacvae_decoder_fp16.onnx on WebGPU (slower, bit-exact fp32 decoder)
           --webgpu-power <P>           high-performance (default) | low-power (integrated GPU)
 
         Runtime (torch backend):

@@ -17,6 +17,7 @@ Output directory layout (what IrodoriTts.Onnx expects):
     dit_step.onnx                legacy single-graph step (only with --legacy-dit-step)
     dacvae_encoder.onnx          waveform -> posterior-mean latent                    (fp32)
     dacvae_decoder.onnx          latent -> waveform                                   (fp32)
+    dacvae_decoder_fp16.onnx     the same in fp16 (float32 in / out), used on WebGPU  (unless --no-decoder-fp16)
 
 Only pretrained-text-encoder checkpoints (v4 family) are supported.
 """
@@ -144,9 +145,11 @@ def main() -> None:
                     help="auto: fp32 for MeanFlow checkpoints (4 steps, exact), fp16 for RF checkpoints (40 steps, faster)")
     ap.add_argument("--legacy-dit-step", action="store_true",
                     help="Also export dit_step.onnx (projects the context K/V in every step; for older runtimes)")
+    ap.add_argument("--no-decoder-fp16", action="store_true",
+                    help="Do not export dacvae_decoder_fp16.onnx (the fp16 decoder the runtime prefers on WebGPU)")
     ap.add_argument("--opset", type=int, default=20)
     ap.add_argument("--only", nargs="*", default=None,
-                    help="Export only these graphs (text_encoder speaker_encoder duration dit_context dit_step_kv dit_step dacvae_decoder dacvae_encoder)")
+                    help="Export only these graphs (text_encoder speaker_encoder duration dit_context dit_step_kv dit_step dacvae_decoder dacvae_decoder_fp16 dacvae_encoder)")
     args = ap.parse_args()
     sys.path.insert(0, args.irodori_repo)
 
@@ -251,7 +254,8 @@ def main() -> None:
     model.pretrained_text_backbone.forward = backbone_forward
 
     def export(module, inputs, names_in, names_out, dyn, name, check=None):
-        if args.only and name not in args.only:
+        # --only dacvae_decoder also selects its fp16 twin.
+        if args.only and name not in args.only and not (name == "dacvae_decoder_fp16" and "dacvae_decoder" in args.only):
             return None
         t0 = time.time()
         with torch.inference_mode():
@@ -473,9 +477,12 @@ def main() -> None:
     with torch.inference_mode():
         kc, vc = DiTContext().eval()(*ctx_in)
         step_in = [dit_in[0], dit_in[1], torch.cat(cmask_all, dim=1), kc, vc] + ([dit_in[8]] if meanflow else [])
+    with torch.inference_mode():
         # The split graphs must reproduce the single-step forward.
-        ref = DiTStep().eval()(*dit_in)
-        got = DiTStepKV().eval()(*step_in)
+        ref = DiTStep().eval()(*dit_in) if not args.only or "dit_step_kv" in args.only else None
+    if ref is not None:
+        with torch.inference_mode():
+            got = DiTStepKV().eval()(*step_in)
         err = (ref.float() - got.float()).abs().max().item()
         print(f"[check] dit_step_kv vs forward_with_encoded_conditions: max abs diff {err:.3e}", flush=True)
         if not err < (5e-2 if dit_dtype == torch.float16 else 1e-3):
@@ -499,7 +506,11 @@ def main() -> None:
     def snake_plain(x, alpha):
         shape = x.shape
         x = x.reshape(shape[0], shape[1], -1)
-        x = x + (alpha + 1e-9).reciprocal() * torch.sin(alpha * x).pow(2)
+        # 1/alpha in fp32 (a constant after export): in fp16, 1e-9 vanishes and small alphas overflow.
+        # s * s, not pow(s, 2): WGSL pow is undefined for negative bases, and the WebGPU EP's fp16 Pow broke the
+        # audio (the fp32 one happens to work).
+        s = torch.sin(alpha * x)
+        x = x + (alpha.float() + 1e-9).reciprocal().to(x.dtype) * (s * s)
         return x.reshape(shape)
 
     L.snake = snake_plain
@@ -515,12 +526,13 @@ def main() -> None:
             super().__init__()
             self.d = dac
 
-        def forward(self, latent):  # (B, T, D) -> (B, 1, T * hop)
-            x = self.d.quantizer.out_proj(latent.transpose(1, 2))
+        def forward(self, latent):  # (B, T, D) -> (B, 1, T * hop), float32 in and out
+            dtype = self.d.quantizer.out_proj.weight.dtype
+            x = self.d.quantizer.out_proj(latent.transpose(1, 2).to(dtype))
             for layer in self.d.decoder.model:
                 x = layer(x)
             pre = self.d.decoder.wm_model.encoder_block.pre  # forward_no_conv: Snake, Conv, Tanh
-            return pre[2](pre[1](pre[0](x)))
+            return pre[2](pre[1](pre[0](x))).float()
 
     class Encoder(torch.nn.Module):
         def __init__(self):
@@ -533,8 +545,52 @@ def main() -> None:
             return mean.transpose(1, 2)
 
     hop = int(dac.hop_length)
-    export(Decoder().eval(), (torch.randn(1, 40, dac.quantizer.codebook_dim),), ["latent"], ["audio"],
-           {"latent": {0: B, 1: D("frames", min=1, max=8192)}}, "dacvae_decoder")
+    # ConvTranspose1d(stride s, kernel 2s) as a 2-tap Conv1d with s * C_out channels and an interleave (polyphase
+    # form, equal up to float rounding). The WebGPU EP's fp16 ConvTranspose is wrong (the stride-10 upsampler fell
+    # to 14 dB against the CPU EP, and the audio with it); Conv is right in fp16 and faster than ConvTranspose.
+    class PolyphaseConvTranspose(torch.nn.Module):
+        def __init__(self, ct):
+            super().__init__()
+            s, k = ct.stride[0], ct.kernel_size[0]
+            if k != 2 * s or ct.groups != 1 or ct.dilation[0] != 1:
+                raise SystemExit(f"unexpected ConvTranspose1d (kernel {k}, stride {s}) in the DACVAE decoder")
+            w = ct.weight.detach()  # (C_in, C_out, 2s)
+            c_in, c_out, _ = w.shape
+            wc = torch.empty(s, c_out, c_in, 2, dtype=w.dtype)
+            wc[..., 0] = w[:, :, s:].permute(2, 1, 0)  # tap on x[q - 1]: kernel index r + s
+            wc[..., 1] = w[:, :, :s].permute(2, 1, 0)  # tap on x[q]:     kernel index r
+            self.weight = torch.nn.Parameter(wc.reshape(s * c_out, c_in, 2))
+            self.bias = None if ct.bias is None else torch.nn.Parameter(ct.bias.detach().repeat(s))
+            self.s, self.c_out, self.pad, self.out_pad = s, c_out, ct.padding[0], ct.output_padding[0]
+            self.unpad = ct.unpad  # NormConvTranspose1d trims after the transposed conv (pad_mode "auto")
+
+        def forward(self, x):
+            b, _, n_in = x.shape
+            y = torch.nn.functional.conv1d(x, self.weight, self.bias, padding=1)  # (B, s * C_out, n_in + 1)
+            y = y.reshape(b, self.s, self.c_out, n_in + 1).permute(0, 2, 3, 1).reshape(b, self.c_out, (n_in + 1) * self.s)
+            n_out = (n_in + 1) * self.s - 2 * self.pad + self.out_pad
+            return self.unpad(y[:, :, self.pad:self.pad + n_out])
+
+    def to_polyphase(module):
+        for name, child in module.named_children():
+            if isinstance(child, torch.nn.ConvTranspose1d):
+                setattr(module, name, PolyphaseConvTranspose(child))
+            else:
+                to_polyphase(child)
+
+    decoder = Decoder().eval()
+    with torch.no_grad():
+        probe = torch.randn(1, 23, dac.quantizer.codebook_dim)
+        before = decoder(probe)
+        to_polyphase(decoder)
+        print(f"[check] polyphase decoder vs ConvTranspose: max abs diff {(decoder(probe) - before).abs().max().item():.3e}", flush=True)
+    dyn_latent = {"latent": {0: B, 1: D("frames", min=1, max=8192)}}
+    export(decoder, (torch.randn(1, 40, dac.quantizer.codebook_dim),), ["latent"], ["audio"], dyn_latent, "dacvae_decoder")
+    if not args.no_decoder_fp16:
+        # Inputs and outputs stay float32. On WebGPU (RTX 4050) a 4.6 s pass takes 0.23 s instead of 0.39 s.
+        decoder.half()
+        export(decoder, (torch.randn(1, 40, dac.quantizer.codebook_dim),), ["latent"], ["audio"], dyn_latent, "dacvae_decoder_fp16")
+        dac.float()
     export(Encoder().eval(), (torch.randn(1, 1, hop * 30) * 0.1,), ["wav"], ["latent"],
            {"wav": {0: B, 2: D("blocks", min=1, max=8192) * hop}}, "dacvae_encoder")
 

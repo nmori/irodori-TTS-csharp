@@ -40,6 +40,7 @@ python export_onnx.py --irodori-repo /path/to/Irodori-TTS \
 | `dit_context.onnx` | DiT の各層の文脈（テキスト・話者・キャプション）の K/V。リクエストごとに 1 回 |
 | `dit_step_kv.onnx` | DiT の 1 ステップ（速度予測）。文脈の K/V を入力に取る |
 | `dacvae_encoder.onnx` / `dacvae_decoder.onnx` | コーデック |
+| `dacvae_decoder_fp16.onnx` | デコーダーの fp16 版（入出力は float32）。WebGPU で使う。`--no-decoder-fp16` で書き出さない |
 
 ## WebGPU 対策として行っている書き換え
 
@@ -52,6 +53,10 @@ ONNX Runtime 1.30 + WebGPU EP 0.4.0 では、次の状況でエラーメッセ�
 - `int(query_len)` による可変長軸の固定化 → 書き出し後に可変長のはずの軸が固定されていないか検査
 - マスク付きアテンションの `IsNaN`（全部マスクされた行を 0 にする処理）→ WebGPU にないため層ごとに CPU と往復していた。
   マスクをスコアに足し込む形で書き出す（DiT 1 ステップ 225 ms → 103 ms）。`IsNaN` が残ると書き出し時に `[warn]` を表示
+- デコーダーの転置畳み込み（stride s, kernel 2s）→ 2 タップの通常の畳み込みと並べ替え（多相分解。数学的に同じ）。
+  WebGPU の fp16 の転置畳み込みは結果が壊れ（stride 10 の層で CPU との差が 14 dB）、fp32 でも通常の畳み込みのほうが速い。
+  書き出し時に元の転置畳み込みとの差を `[check]` で表示します
+- デコーダーの Snake 活性化の `sin(...)**2` は `s * s` で書き出す（WGSL の `pow` は負の底で未定義）
 
 ## 配布用のパッケージ（package_onnx.py）
 

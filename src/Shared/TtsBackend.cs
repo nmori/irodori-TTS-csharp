@@ -162,8 +162,9 @@ internal sealed class TtsBackend(
             Device = device,
             EncoderDevice = flag("onnx-encoders-on-cpu") ? OnnxDevice.Cpu : null,
             WebGpuPowerPreference = option("webgpu-power") ?? "high-performance",
+            DecoderFp16 = flag("onnx-decoder-fp32") ? false : null,
         });
-        string desc = $"onnx ({device}{(onnx.AdapterDescription is string ad ? ": " + ad : "")})";
+        string desc = $"onnx ({device}{(onnx.AdapterDescription is string ad ? ": " + ad : "")}, decoder {onnx.DecoderPrecision})";
         log($"[load] {desc} done in {loadWatch.Elapsed.TotalSeconds:F1} s: {onnxDir}");
         return new TtsBackend(onnx.Synthesize, onnx, desc, onnx.ModelConfig.IsMeanFlow, supportsSpeakerEmbedding: true)
         {

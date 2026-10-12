@@ -332,6 +332,23 @@ NVIDIA GPU では TorchSharp CUDA のほうが大幅に速いので、自動選�
 - **以前に書き出したモデルフォルダには効きません。** `export_onnx.py --only text_encoder speaker_encoder duration dit_context dit_step_kv` で書き出し直してください。
   `IsNaN` が残っていると、書き出し時に `[warn]` を表示します
 
+デコーダー（潜在 → 波形。MeanFlow 版では合成時間の大半）の高速化（17.5 秒の音声、RTX 4050 での実測）:
+
+| | WebGPU | CPU |
+| --- | --- | --- |
+| 以前（区切りの前後 12 フレームを重ねる） | 1.83 秒 | 13.3 秒 |
+| 重ねる量を 8 フレームに | 1.74 秒 | — |
+| ＋ 転置畳み込みを通常の畳み込みに書き換えた書き出し（fp32） | 1.38 秒 | 11.3 秒 |
+| ＋ fp16 のデコーダー（WebGPU の既定） | **0.91 秒** | （使わない） |
+
+- デコーダーの受容野は前後 8 フレームに収まり、8 フレーム重ねれば 12 フレームとビット単位で同じ結果になります（6 では変わる）
+- 書き出しでは、アップサンプリングの転置畳み込み（stride s, kernel 2s）を、2 タップの通常の畳み込み（出力 s 倍のチャンネル）と
+  並べ替えに置き換えます（数学的に同じ。PyTorch で差 8e-7、WebGPU ではビット単位で同じ音声）。WebGPU・CPU とも速くなります
+- `dacvae_decoder_fp16.onnx` があれば WebGPU ではそちらを使います（`--onnx-decoder-fp32` / `OnnxRuntimeOptions.DecoderFp16 = false` で無効）。
+  fp32 のデコーダーとの差は SNR 44 dB（PyTorch で fp16 にしたときは 57 dB）。Intel Iris Xe（WebGPU）でも正しく動き、24.8 秒 → 17.9 秒でした。
+  WebGPU の fp16 の転置畳み込みは結果が壊れる（14 dB）ため、上の書き換えは fp16 を使う前提にもなっています
+- 以前のモデルフォルダでも重ねる量の変更は効きます。書き換えと fp16 は `export_onnx.py --only dacvae_decoder` で書き出し直すと使えます
+
 メモリと CPU（MeanFlow 版、17.5 秒の音声、WebGPU / RTX 4050 での実測）:
 
 - デコードは TorchSharp 版と同じく区切って行います（`OnnxInferenceRuntime.DecodeChunkFrames`）。

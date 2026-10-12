@@ -114,9 +114,9 @@ public sealed class DacVaeCodec : IDisposable
     /// <summary>
     /// Latent frames of context decoded on each side of a chunk and then dropped. The decoder is purely
     /// convolutional, so with enough context each chunk matches the one-pass output (8 frames measured at the
-    /// fp32 noise floor, ~5e-4 against a 0.43 peak).
+    /// fp32 noise floor, ~5e-4 against a 0.43 peak; on WebGPU 8 gives the same bits as 12, 6 does not).
     /// </summary>
-    public int DecodeContextFrames { get; set; } = 12;
+    public int DecodeContextFrames { get; set; } = 8;
 
     /// <summary>(B, T, D) latents → (B, 1, samples) float32 audio on the CPU.</summary>
     public Tensor DecodeLatent(Tensor latent)
