@@ -60,7 +60,8 @@ public sealed class TestServer : IAsyncDisposable
     }
 
     public static async Task<TestServer> StartAsync(
-        string? apiKey = null, string? defaultVoice = null, bool allowNoRef = true, Action<string>? prepareVoices = null)
+        string? apiKey = null, string? defaultVoice = null, bool allowNoRef = true, Action<string>? prepareVoices = null,
+        Func<JsonObject?>? modelStatus = null)
     {
         var dir = Path.Combine(Path.GetTempPath(), "irodori-server-tests", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);
@@ -75,6 +76,7 @@ public sealed class TestServer : IAsyncDisposable
             AllowNoRef = allowNoRef,
             VoicesDir = dir,
             Log = _ => { },
+            ModelStatus = modelStatus,
         }, engine);
         await app.StartAsync();
         var address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.First();

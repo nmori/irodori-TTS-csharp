@@ -1,6 +1,7 @@
 using System.Globalization;
 using IrodoriTts;
 using IrodoriTts.Hosting;
+using IrodoriTts.IO;
 using IrodoriTts.Server;
 
 var opts = Args.Parse(args);
@@ -68,19 +69,85 @@ catch (Exception ex) when (ex is ArgumentException or FileNotFoundException or I
     return 1;
 }
 
-using (backend)
+var engine = new SwitchableEngine(new BackendEngine(backend));
+var onnxStatus = new StatusBox();
+if (backend.OnnxAuto is not null)
 {
-    var app = ServerApp.Build(options, new BackendEngine(backend));
+    onnxStatus.Value = backend.OnnxDirectory is string inUse ? Ready(inUse) : new OnnxModelStatus("pending");
+}
+using var stopping = CancellationTokenSource.CreateLinkedTokenSource(parentExited.Token);
+try
+{
+    var app = ServerApp.Build(new ServerOptions
+    {
+        Host = options.Host, Port = options.Port, ModelName = options.ModelName, ApiKey = options.ApiKey,
+        DefaultVoice = options.DefaultVoice, AllowNoRef = options.AllowNoRef, VoicesDir = options.VoicesDir,
+        ModelStatus = backend.OnnxAuto is null ? null : () => onnxStatus.Value?.ToJson(),
+    }, engine);
+    app.Lifetime.ApplicationStopping.Register(stopping.Cancel);
     Console.WriteLine($"[server] Irodori-TTS C# server listening on http://{options.Host}:{options.Port} (model='{options.ModelName}', voices='{Path.GetFullPath(options.VoicesDir)}')");
     // In the background so the port opens at once; a request arriving meanwhile waits for it (synthesis is serialized).
     // GPU only: the CPU has no kernel setup to amortize, and the warm-up would only hold up an early request.
-    bool onGpu = backend.Description.Contains("cuda", StringComparison.OrdinalIgnoreCase)
-        || backend.Description.Contains("webgpu", StringComparison.OrdinalIgnoreCase);
-    var warmup = onGpu && !opts.ContainsKey("no-warmup") ? Task.Run(() => Warmup(backend)) : Task.CompletedTask;
+    bool warm = !opts.ContainsKey("no-warmup");
+    var warmup = warm && OnGpu(backend) ? Task.Run(() => Warmup(backend)) : Task.CompletedTask;
+    // On a discrete non-NVIDIA GPU: download (or update) the ONNX model while serving, then switch to it.
+    var onnxUpdate = backend.OnnxAuto is { } plan
+        ? Task.Run(() => UpdateOnnxAsync(plan, warmup, warm, stopping.Token))
+        : Task.CompletedTask;
     await app.RunAsync(parentExited.Token);
+    stopping.Cancel();
     await warmup;
+    await onnxUpdate;
+}
+finally
+{
+    ((BackendEngine)engine.Current).Backend.Dispose();
 }
 return 0;
+
+static bool OnGpu(TtsBackend b) =>
+    b.Description.Contains("cuda", StringComparison.OrdinalIgnoreCase) || b.Description.Contains("webgpu", StringComparison.OrdinalIgnoreCase);
+
+static OnnxModelStatus Ready(string dir, string? error = null) =>
+    new("ready", Path.GetFileName(Path.GetDirectoryName(dir)), Directory: dir, Error: error);
+
+// Install the manifest's current version (returns at once when it is already there) and, when that is not the
+// model in use, load it, warm it up and swap it in; the previous engine is disposed. Any failure keeps the
+// current engine.
+async Task UpdateOnnxAsync(OnnxAutoPlan plan, Task warmup, bool warm, CancellationToken cancellationToken)
+{
+    try
+    {
+        string dir = await OnnxModelStore.InstallAsync(plan.Root, plan.ModelId, plan.ManifestUrl,
+            s => onnxStatus.Value = s, Console.WriteLine, cancellationToken);
+        var current = ((BackendEngine)engine.Current).Backend;
+        if (current.OnnxDirectory is string inUse && string.Equals(inUse, Path.GetFullPath(dir), StringComparison.OrdinalIgnoreCase))
+        {
+            onnxStatus.Value = Ready(dir);
+            return;
+        }
+        onnxStatus.Value = new OnnxModelStatus("loading", Directory: dir);
+        await warmup;  // do not load next to a warm-up still running on the old engine
+        var next = TtsBackend.LoadOnnx(dir, plan.Device, key => Args.Str(opts, key), key => opts.ContainsKey(key),
+            Console.WriteLine, plan);
+        if (warm) Warmup(next);
+        var previous = (BackendEngine)engine.Swap(new BackendEngine(next));
+        previous.Backend.Dispose();
+        onnxStatus.Value = Ready(dir);
+        Console.WriteLine($"[onnx] now synthesizing with {next.Description}");
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+    {
+    }
+    catch (Exception ex)
+    {
+        var current = ((BackendEngine)engine.Current).Backend;
+        onnxStatus.Value = current.OnnxDirectory is string inUse
+            ? Ready(inUse, $"update failed: {ex.Message}")
+            : new OnnxModelStatus("failed", Error: ex.Message);
+        Console.WriteLine($"[onnx] could not install the ONNX model ({ex.Message}); keeping {current.Description}.");
+    }
+}
 
 // The first synthesis pays for CUDA / WebGPU kernel setup and for the codec encoder (~1 s on an RTX 4050).
 // Run it once at start-up: a short no-reference sentence, then one step with that audio as the reference so
@@ -107,9 +174,17 @@ static void Warmup(TtsBackend backend)
     }
 }
 
+/// <summary>Latest <see cref="OnnxModelStatus"/>, written by the download task and read by /health.</summary>
+internal sealed class StatusBox
+{
+    private OnnxModelStatus? _value;
+    public OnnxModelStatus? Value { get => Volatile.Read(ref _value); set => Volatile.Write(ref _value, value); }
+}
+
 /// <summary>Adapts the shared <see cref="TtsBackend"/> to the server's engine interface.</summary>
 internal sealed class BackendEngine(TtsBackend backend) : ISpeechEngine
 {
+    public TtsBackend Backend => backend;
     public string Description => backend.Description;
     public bool IsMeanFlow => backend.IsMeanFlow;
     public SamplingResult Synthesize(SamplingRequest request) => backend.Synthesize(request);
@@ -143,6 +218,16 @@ internal static class Args
                                      when an NVIDIA driver is present, to %IRODORI_TTS_CACHE%\runtime or else
                                      %LOCALAPPDATA%\IrodoriTts\runtime (per-user, no admin rights needed).
                                      Without enough free space (~7 GB while installing) the CPU is used
+
+        Downloadable ONNX model (auto backend on a discrete non-NVIDIA GPU such as AMD Radeon / Intel Arc, when no
+        --onnx-dir / --checkpoint / --hf-checkpoint / --model-device is given): served at once with TorchSharp CPU,
+        while the ONNX model (~3 GB) is downloaded, verified and unpacked; then synthesis switches to it.
+        Later starts use it directly and pick up a newer version listed in the manifest. Progress: /health "onnx_model".
+          --no-onnx-download         Do not download or update it (an installed one is still used)
+          --onnx-auto                Use it on any PC (also NVIDIA / no discrete GPU; the CPU runs it without a discrete GPU)
+          --onnx-manifest-url <URL>  IRODORI_ONNX_MANIFEST_URL, default https://machanbazaar.com/model/irodori-onnx.json
+          --onnx-model <ID>          Model id in the manifest, default irodori-v4.1-small-mf
+          --onnx-store <DIR>         Where it is kept, default %IRODORI_TTS_CACHE%\onnx or %LOCALAPPDATA%\IrodoriTts\onnx
         """;
 
     public static Dictionary<string, List<string>> Parse(string[] argv)

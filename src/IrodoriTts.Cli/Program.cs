@@ -38,6 +38,9 @@ internal static class Cli
                                        auto: NVIDIA GPU -> torch(cuda); else with --onnx-dir: onnx on a discrete
                                        GPU via WebGPU, or onnx on the CPU (integrated GPUs are slower than the
                                        CPU); without --onnx-dir: torch(cpu) with the MeanFlow model
+                                       A discrete non-NVIDIA GPU uses the ONNX model the server downloaded
+                                       (%LOCALAPPDATA%\IrodoriTts\onnx) when it is there
+          --onnx-auto                  Use that downloaded model on any PC (NVIDIA / no discrete GPU: CPU)
           --onnx-dir <DIR>             Output of tools/onnx_export/export_onnx.py
           --onnx-device <D>            webgpu (default) | cpu
           --onnx-encoders-on-cpu       Run text/speaker encoders on the CPU (saves ~1.5 GB GPU memory)

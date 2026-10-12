@@ -21,6 +21,15 @@ internal sealed class TtsBackend(
 
     public SamplingResult Synthesize(SamplingRequest r, Action<string>? log = null) => synthesize(r, log);
 
+    /// <summary>The ONNX model folder in use (null on TorchSharp).</summary>
+    public string? OnnxDirectory { get; init; }
+
+    /// <summary>
+    /// Set when the PC should run the downloadable ONNX model (a discrete non-NVIDIA GPU, nothing chosen by hand):
+    /// the server keeps it installed and up to date and switches to it (see <see cref="OnnxModelStore"/>).
+    /// </summary>
+    public OnnxAutoPlan? OnnxAuto { get; init; }
+
     public void Dispose() => owner.Dispose();
 
     /// <summary>
@@ -29,6 +38,8 @@ internal sealed class TtsBackend(
     /// auto: NVIDIA GPU → TorchSharp CUDA; otherwise, with onnx-dir, ONNX on a discrete WebGPU GPU
     /// (AMD / Intel Arc ...) or ONNX on the CPU; without onnx-dir, TorchSharp CPU with the MeanFlow
     /// checkpoint. Integrated GPUs are skipped: they measured slower than the CPU.
+    /// On a discrete non-NVIDIA GPU with nothing chosen by hand, the downloaded ONNX model
+    /// (<see cref="OnnxModelStore"/>) is used when installed, and <see cref="OnnxAuto"/> is set.
     /// </summary>
     public static async Task<TtsBackend> LoadAsync(Func<string, string?> option, Func<string, bool> flag, Action<string> log)
     {
@@ -46,6 +57,33 @@ internal sealed class TtsBackend(
         if (libtorch is not null) log($"[runtime] LibTorch: {libtorch}");
         bool cuda = TorchSharp.torch.cuda.is_available();
         string? autoOnnxDevice = null;
+        OnnxAutoPlan? onnxAuto = null;
+        // The downloadable ONNX model: by default on a discrete non-NVIDIA GPU (NVIDIA is left out even when CUDA
+        // is not up yet: the CUDA build of LibTorch is the faster path there); with --onnx-auto on any PC.
+        if (backend == "auto" && onnxDir is null && requestedDevice is null
+            && option("checkpoint") is null && option("hf-checkpoint") is null
+            && (option("onnx-store") ?? OnnxModelStore.DefaultRoot) is string store)
+        {
+            bool discrete = OnnxInferenceRuntime.HasDiscreteWebGpu();
+            if (flag("onnx-auto") || (discrete && !cuda && !LibTorchRuntime.HasNvidiaDriver))
+            {
+                var device = discrete ? OnnxDevice.WebGpu : OnnxDevice.Cpu;
+                string id = option("onnx-model") ?? OnnxModelStore.DefaultModelId;
+                if (OnnxModelStore.FindInstalled(store, id) is string installed)
+                {
+                    onnxDir = installed;
+                    backend = "onnx";
+                    autoOnnxDevice = device == OnnxDevice.Cpu ? "cpu" : "webgpu";
+                    log($"[backend] auto -> onnx ({autoOnnxDevice}), downloaded model: {installed}");
+                }
+                if (!flag("no-onnx-download"))
+                {
+                    onnxAuto = new OnnxAutoPlan(store, id,
+                        option("onnx-manifest-url") ?? Environment.GetEnvironmentVariable("IRODORI_ONNX_MANIFEST_URL") ?? OnnxModelStore.DefaultManifestUrl,
+                        device);
+                }
+            }
+        }
         if (backend == "auto")
         {
             if (cuda || option("model-device") is not null || onnxDir is null)
@@ -72,16 +110,7 @@ internal sealed class TtsBackend(
             if (onnxDir is null) throw new ArgumentException("--backend onnx requires --onnx-dir (see tools/onnx_export).");
             var device = (option("onnx-device") ?? autoOnnxDevice ?? "webgpu").ToLowerInvariant() == "cpu"
                 ? OnnxDevice.Cpu : OnnxDevice.WebGpu;
-            var onnx = OnnxInferenceRuntime.Load(new OnnxRuntimeOptions
-            {
-                ModelDirectory = onnxDir,
-                Device = device,
-                EncoderDevice = flag("onnx-encoders-on-cpu") ? OnnxDevice.Cpu : null,
-                WebGpuPowerPreference = option("webgpu-power") ?? "high-performance",
-            });
-            string desc = $"onnx ({device}{(onnx.AdapterDescription is string ad ? ": " + ad : "")})";
-            log($"[load] {desc} done in {loadWatch.Elapsed.TotalSeconds:F1} s: {onnxDir}");
-            return new TtsBackend(onnx.Synthesize, onnx, desc, onnx.ModelConfig.IsMeanFlow, supportsSpeakerEmbedding: true);
+            return LoadOnnx(onnxDir, device, option, flag, log, onnxAuto);
         }
         if (backend != "torch") throw new ArgumentException($"Unknown --backend {backend}. Use auto, torch or onnx.");
 
@@ -119,7 +148,28 @@ internal sealed class TtsBackend(
         });
         log($"[load] done in {loadWatch.Elapsed.TotalSeconds:F1} s (model={modelDevice}, codec={codecDevice})");
         return new TtsBackend(runtime.Synthesize, runtime, $"torch ({modelDevice}, {precision})",
-            runtime.ModelConfig.IsMeanFlow, supportsSpeakerEmbedding: true);
+            runtime.ModelConfig.IsMeanFlow, supportsSpeakerEmbedding: true) { OnnxAuto = onnxAuto };
+    }
+
+    /// <summary>Load an ONNX model folder (also used to switch to a freshly downloaded one).</summary>
+    public static TtsBackend LoadOnnx(string onnxDir, OnnxDevice device, Func<string, string?> option, Func<string, bool> flag,
+        Action<string> log, OnnxAutoPlan? onnxAuto = null)
+    {
+        var loadWatch = System.Diagnostics.Stopwatch.StartNew();
+        var onnx = OnnxInferenceRuntime.Load(new OnnxRuntimeOptions
+        {
+            ModelDirectory = onnxDir,
+            Device = device,
+            EncoderDevice = flag("onnx-encoders-on-cpu") ? OnnxDevice.Cpu : null,
+            WebGpuPowerPreference = option("webgpu-power") ?? "high-performance",
+        });
+        string desc = $"onnx ({device}{(onnx.AdapterDescription is string ad ? ": " + ad : "")})";
+        log($"[load] {desc} done in {loadWatch.Elapsed.TotalSeconds:F1} s: {onnxDir}");
+        return new TtsBackend(onnx.Synthesize, onnx, desc, onnx.ModelConfig.IsMeanFlow, supportsSpeakerEmbedding: true)
+        {
+            OnnxDirectory = Path.GetFullPath(onnxDir),
+            OnnxAuto = onnxAuto,
+        };
     }
 
     /// <summary>
@@ -144,3 +194,6 @@ internal sealed class TtsBackend(
         else Console.Error.Write($"\r[download] {file}: {pct}   ");
     }
 }
+
+/// <summary>Where the downloadable ONNX model is kept and which one (see <see cref="TtsBackend.OnnxAuto"/>).</summary>
+internal sealed record OnnxAutoPlan(string Root, string ModelId, string ManifestUrl, OnnxDevice Device);

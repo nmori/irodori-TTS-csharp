@@ -248,6 +248,33 @@ dotnet publish src/IrodoriTts.Server -c Release -r win-x64 --self-contained true
 内蔵 GPU は計測すると CPU より遅かったため（下表）、自動選択では使いません。`--backend onnx --webgpu-power low-power`
 で明示的に使うことはできます。
 
+### サーバーによるモデルの自動取得
+
+`--onnx-dir` を渡さなくても、**NVIDIA 以外の単体 GPU**（AMD Radeon、Intel Arc など）の PC では、
+`irodori-tts-server` が ONNX モデル（MeanFlow 版、約 3 GB）を自動で取得して切り替えます。
+
+1. 起動直後は、すぐ使える TorchSharp CPU + MeanFlow 版で受け付けます
+2. 裏で `https://machanbazaar.com/model/irodori-onnx.json` を読み、分割 ZIP を `%LOCALAPPDATA%\IrodoriTts\onnx`
+   （`IRODORI_TTS_CACHE` があればその下の `onnx`）に取得します。分割ファイルごとと ZIP 全体の SHA-256 を確かめ、
+   途中で切れたら続きから取り直します。取得中の空き容量は約 7 GB 必要です
+3. 展開して完了の印を書いたら、ONNX モデルを読み込んでウォームアップし、合成の合間に切り替えます
+   （合成中のリクエストは終わるのを待ちます）。以前のエンジンは解放します
+4. 次回からは最初から ONNX モデルで起動します。一覧に新しい版が載ると、同じ流れで取得して切り替え、古い版を消します
+
+進み具合は `/health` の `onnx_model`（`state`: pending / checking / downloading / verifying / extracting / loading / ready / failed、
+`downloaded_bytes` / `total_bytes`）で分かります。失敗しても今のエンジンのまま動き続けます。
+
+| オプション | 内容 |
+| --- | --- |
+| `--no-onnx-download` | 取得・更新しない（取得済みのものは使う） |
+| `--onnx-auto` | NVIDIA や単体 GPU のない PC でも使う（単体 GPU がなければ CPU で動かす） |
+| `--onnx-manifest-url <URL>` | 一覧の場所（`IRODORI_ONNX_MANIFEST_URL`） |
+| `--onnx-model <ID>` / `--onnx-store <DIR>` | 一覧の中のモデル ID（既定 `irodori-v4.1-small-mf`）/ 保存先 |
+
+`--onnx-dir`・`--checkpoint`・`--hf-checkpoint`・`--model-device` を指定したときは、指定のとおりに動き、取得もしません。
+配布物（分割 ZIP と一覧）は [tools/onnx_export/package_onnx.py](tools/onnx_export/README.md) で作ります。
+ZIP の `LICENSES/` に、元のモデルのライセンス（MIT: Aratako, SB Intuitions / Apache-2.0: Meta の DACVAE）と倫理上の注意を入れています。
+
 ```powershell
 irodori-tts --onnx-dir D:\models\irodori-v4.1-small-mf-onnx --text "こんにちは。" --ref-wav reference.wav --output-wav out.wav
 ```

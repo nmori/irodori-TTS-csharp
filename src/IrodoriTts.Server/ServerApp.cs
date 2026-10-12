@@ -24,6 +24,51 @@ public sealed class ServerOptions
     public bool AllowNoRef { get; init; } = true;
     public string VoicesDir { get; init; } = "voices";
     public Action<string> Log { get; init; } = Console.WriteLine;
+    /// <summary>State of the downloadable ONNX model, shown as <c>onnx_model</c> in /health (null: not used on this PC).</summary>
+    public Func<JsonObject?>? ModelStatus { get; init; }
+}
+
+/// <summary>
+/// An engine that can be replaced while the server runs (e.g. TorchSharp CPU → a freshly downloaded ONNX model).
+/// A swap waits for syntheses in progress; requests arriving meanwhile wait and then use the new engine.
+/// </summary>
+public sealed class SwitchableEngine(ISpeechEngine initial) : ISpeechEngine
+{
+    private readonly ReaderWriterLockSlim _lock = new();
+    private ISpeechEngine _current = initial;
+
+    public ISpeechEngine Current => Volatile.Read(ref _current);
+    public string Description => Current.Description;
+    public bool IsMeanFlow => Current.IsMeanFlow;
+
+    public SamplingResult Synthesize(SamplingRequest request)
+    {
+        _lock.EnterReadLock();
+        try
+        {
+            return _current.Synthesize(request);
+        }
+        finally
+        {
+            _lock.ExitReadLock();
+        }
+    }
+
+    /// <summary>Use <paramref name="next"/> from now on and return the previous engine (no synthesis is using it any more).</summary>
+    public ISpeechEngine Swap(ISpeechEngine next)
+    {
+        _lock.EnterWriteLock();
+        try
+        {
+            var previous = _current;
+            Volatile.Write(ref _current, next);
+            return previous;
+        }
+        finally
+        {
+            _lock.ExitWriteLock();
+        }
+    }
 }
 
 /// <summary>
@@ -81,6 +126,7 @@ public static class ServerApp
             ["voices_dir"] = Path.GetFullPath(o.VoicesDir),
             ["default_voice"] = o.DefaultVoice,
             ["allow_no_ref_voice"] = o.AllowNoRef,
+            ["onnx_model"] = o.ModelStatus?.Invoke(),
         }));
 
         app.MapGet("/v1/models", () => Results.Json(new JsonObject
