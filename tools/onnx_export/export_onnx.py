@@ -190,6 +190,29 @@ def main() -> None:
 
     M.build_context_attention_plan = build_plan
 
+    # The exporter lowers a boolean-masked SDPA to a softmax followed by IsNaN -> Where (zeroing fully masked
+    # rows). WebGPU has no IsNaN kernel, so every attention layer copied its score matrix to the CPU and back:
+    # ~155 of 276 ms per DiT step (RTX 4050, 438 frames). Irodori's masks always leave at least one valid key
+    # per row that matters (self tokens in joint attention, the safe-mask first key, ModernBERT's
+    # key | ~any), so an additive mask is equivalent there; rows that are fully masked (padding queries) are
+    # masked out downstream anyway.
+    _sdpa_orig = torch.nn.functional.scaled_dot_product_attention
+
+    def sdpa_additive(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None, enable_gqa=False):
+        if is_causal or dropout_p or enable_gqa:
+            return _sdpa_orig(query, key, value, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal,
+                              scale=scale, enable_gqa=enable_gqa)
+        scale = query.shape[-1] ** -0.5 if scale is None else scale
+        scores = torch.matmul(query, key.transpose(-2, -1)).float() * scale
+        if attn_mask is not None:
+            if attn_mask.dtype == torch.bool:
+                scores = scores + (attn_mask.float() - 1.0) * 1e9
+            else:
+                scores = scores + attn_mask.float()
+        return torch.matmul(torch.softmax(scores, dim=-1).to(value.dtype), value)
+
+    torch.nn.functional.scaled_dot_product_attention = sdpa_additive
+
     # ---------------------------------------------------------------- model
     ckpt = Path(args.checkpoint)
     state, cfgd, infer_cfg, enc_cfg = _load_checkpoint_for_inference(ckpt)
@@ -240,6 +263,10 @@ def main() -> None:
                 d = inp.type.tensor_type.shape.dim[axis]
                 if not d.dim_param:
                     raise SystemExit(f"{name}: input '{inp.name}' axis {axis} was exported as static size {d.dim_value}.")
+        # WebGPU has no IsNaN kernel: each one runs on the CPU with a GPU -> CPU -> GPU copy around it.
+        n_isnan = sum(1 for n in graph.node if n.op_type == "IsNaN")
+        if n_isnan:
+            print(f"[warn] {name}.onnx has {n_isnan} IsNaN node(s); they fall back to the CPU on WebGPU.", flush=True)
         n_patched = patch_bool_ops(out / f"{name}.onnx")
         print(f"[export] {name}.onnx ({time.time() - t0:.0f}s, bool-op patches: {n_patched})", flush=True)
         return ref

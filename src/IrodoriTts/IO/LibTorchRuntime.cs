@@ -107,6 +107,7 @@ public static class LibTorchRuntime
         string? cudaDirectory, bool allowDownload, bool wantCuda, Action<string> log,
         IProgress<(string File, long Downloaded, long? Total)>? progress = null, CancellationToken cancellationToken = default)
     {
+        UsePassiveOpenMpWait();
         if (!IsSplitLayout)
         {
             // LibTorch sits next to the exe; only an explicit, ready CUDA build may replace it.
@@ -205,6 +206,7 @@ public static class LibTorchRuntime
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Choosing LibTorch at start-up is Windows-only.");
         string dir = Path.GetFullPath(directory);
         if (!File.Exists(Path.Combine(dir, "torch_cpu.dll"))) throw new FileNotFoundException($"torch_cpu.dll not found in {dir}");
+        UsePassiveOpenMpWait();
         PreloadAppLocalVcRuntime();
         if (!SetDllDirectoryW(dir))
         {
@@ -236,6 +238,20 @@ public static class LibTorchRuntime
         "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll",
         "msvcp140_atomic_wait.dll", "concrt140.dll",
     };
+
+    /// <summary>
+    /// LibTorch's OpenMP threads busy-wait for work by default. With the model on the GPU that kept ~13 of 20
+    /// cores spinning during synthesis (64% CPU) for no speed gain; sleeping instead dropped it to one core.
+    /// On the CPU it was also slightly faster (68% → 45% CPU). OpenMP reads this once when LibTorch loads, so
+    /// it must be set before then; a value the user set is kept.
+    /// </summary>
+    public static void UsePassiveOpenMpWait()
+    {
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("OMP_WAIT_POLICY")))
+        {
+            Environment.SetEnvironmentVariable("OMP_WAIT_POLICY", "PASSIVE");
+        }
+    }
 
     private static bool _vcRuntimePreloaded;
 

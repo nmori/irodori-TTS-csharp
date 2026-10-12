@@ -104,14 +104,49 @@ public sealed class DacVaeCodec : IDisposable
         return z.transpose(1, 2).contiguous().to(ScalarType.Float32).cpu().MoveToOuterDisposeScope();
     }
 
+    /// <summary>
+    /// Latent frames decoded per pass (default 100 = 4 s). The decoder's 48 kHz activations grow with the
+    /// length; decoding a long utterance in one pass overflowed 6 GB of VRAM at ~10 s and ran ~10x slower.
+    /// A non-positive value decodes in one pass.
+    /// </summary>
+    public int DecodeChunkFrames { get; set; } = 100;
+
+    /// <summary>
+    /// Latent frames of context decoded on each side of a chunk and then dropped. The decoder is purely
+    /// convolutional, so with enough context each chunk matches the one-pass output (8 frames measured at the
+    /// fp32 noise floor, ~5e-4 against a 0.43 peak).
+    /// </summary>
+    public int DecodeContextFrames { get; set; } = 12;
+
     /// <summary>(B, T, D) latents → (B, 1, samples) float32 audio on the CPU.</summary>
     public Tensor DecodeLatent(Tensor latent)
     {
         if (latent.dim() != 3) throw new ArgumentException("Expected latent shape (B, T, D).");
         using var _ = torch.inference_mode();
-        using var scope = torch.NewDisposeScope();
-        var z = latent.transpose(1, 2).contiguous().to(Device).to(DType);
-        return _model.Decode(z).to(ScalarType.Float32).cpu().MoveToOuterDisposeScope();
+        long frames = latent.shape[1];
+        int chunk = DecodeChunkFrames;
+        int context = Math.Max(0, DecodeContextFrames);
+        if (chunk <= 0 || frames <= chunk + 2L * context)
+        {
+            using var scope = torch.NewDisposeScope();
+            var z = latent.transpose(1, 2).contiguous().to(Device).to(DType);
+            return _model.Decode(z).to(ScalarType.Float32).cpu().MoveToOuterDisposeScope();
+        }
+
+        int hop = HopLength;
+        var output = torch.empty(new long[] { latent.shape[0], 1, frames * hop }, dtype: ScalarType.Float32);
+        for (long start = 0; start < frames; start += chunk)
+        {
+            using var scope = torch.NewDisposeScope();
+            long end = Math.Min(frames, start + chunk);
+            long from = Math.Max(0, start - context);
+            long to = Math.Min(frames, end + context);
+            var z = latent[TensorIndex.Colon, TensorIndex.Slice(from, to)].transpose(1, 2).contiguous().to(Device).to(DType);
+            var audio = _model.Decode(z);
+            var keep = audio[TensorIndex.Ellipsis, TensorIndex.Slice((start - from) * hop, (end - from) * hop)];
+            output[TensorIndex.Ellipsis, TensorIndex.Slice(start * hop, end * hop)] = keep.to(ScalarType.Float32).cpu();
+        }
+        return output;
     }
 
     public void Dispose() => _model.Dispose();

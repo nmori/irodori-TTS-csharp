@@ -167,6 +167,19 @@ bf16 で Python と同じ音声を得ることはできません。Python と同
 
 VRAM が 6〜8 GB の GPU では `--model-precision bf16` を推奨します。
 
+長い音声（17.5 秒、参照音声 + キャプション、RTX 4050 bf16）では次のとおりです。
+
+| | RF 40 ステップ | MeanFlow 4 ステップ |
+| --- | --- | --- |
+| 合計 | 約 3.1 秒 | 約 1.2 秒 |
+| うちデコード | 約 0.9 秒 | 約 0.9 秒 |
+
+- 波形へのデコードは 4 秒（100 フレーム）ずつ、前後に 12 フレームを重ねて行います（`DacVaeCodec.DecodeChunkFrames` /
+  `DecodeContextFrames`）。一度にデコードすると、6 GB の GPU では 10 秒を超えたあたりで VRAM があふれ、約 10 倍遅くなっていました
+  （17.5 秒の音声で 5〜6 秒）。区切ってデコードした結果は、一度にデコードした場合と最大 5e-4（ピーク 0.43 に対して）しか違いません
+- LibTorch の CPU スレッドは、仕事を待つ間に空回りせず休むように設定しています（`OMP_WAIT_POLICY=PASSIVE`、
+  自分で設定した値があればそちらを使います）。GPU で合成中の CPU 使用率が 64% から 5% に下がり、CPU だけでも少し速くなります
+
 ## HTTP サーバー（Irodori-TTS-Server 互換）
 
 `irodori-tts-server` は、Python 版の [Irodori-TTS-Server](https://github.com/Aratako/Irodori-TTS-Server) と同じ
@@ -192,6 +205,8 @@ irodori-tts-server --voices-dir D:\voices --model-precision bf16    # 既定で 
 - `speed` は話速（尺予測の結果を 1/speed 倍）。0.25〜4.0
 - 環境変数も Python 版と同じ名前（`IRODORI_API_KEY`, `IRODORI_DEFAULT_VOICE`, `IRODORI_MODEL_NAME` など）
 - 参照音声の潜在表現はキャッシュするので、同じ声の 2 回目以降は速くなります（RTX 4050 で 4.6 秒の音声を約 1.1 秒）
+- GPU で動かすときは、待ち受けを始めたあとに裏で 1 回合成して、最初のリクエストの遅れ（約 1 秒）をなくします。
+  その間に届いたリクエストは、ウォームアップが終わるのを待ってから処理されます。`--no-warmup` で無効にできます
 - 実行方式（`--backend`, `--onnx-dir` など）は CLI と同じです
 - Python 版との違い: `response_format` は `wav` / `pcm` のみ（mp3 / flac / opus / aac は未対応）、
   `stream_format: "sse"` と文単位の分割合成（`chunking_*`）、`lora_adapter`、`.pt` の参照潜在は未対応です
@@ -254,7 +269,7 @@ var result = tts.Synthesize(new SamplingRequest { Text = "こんにちは。", N
 
 必要なパッケージは `Microsoft.ML.OnnxRuntime` と `Microsoft.ML.OnnxRuntime.EP.WebGpu` です（`IrodoriTts.Onnx` が参照済み）。
 
-**実測（MeanFlow 版、10 秒の音声、参照音声 + キャプション、2 回目以降）**
+**実測（MeanFlow 版、10 秒の音声、参照音声 + キャプション、2 回目以降。下記のアテンション修正より前の書き出し）**
 
 | 実行方式 | 合計 | Python 版との一致（同じ初期ノイズ） |
 | --- | --- | --- |
@@ -264,8 +279,27 @@ var result = tts.Synthesize(new SamplingRequest { Text = "こんにちは。", N
 | ONNX / WebGPU / Intel Iris Xe（内蔵, DiT fp16） | 約 21.5 秒 | SNR 19 dB |
 | 参考: TorchSharp CUDA bf16 | 約 1.3 秒 | — |
 
-通常版（RF 40 ステップ）は ONNX / WebGPU / RTX 4050 で約 18 秒（初回実行）かかります。
+通常版（RF 40 ステップ）は ONNX / WebGPU / RTX 4050 で約 18 秒（初回実行）かかります（アテンション修正後は 17.5 秒の音声で約 14 秒）。
 NVIDIA GPU では TorchSharp CUDA のほうが大幅に速いので、自動選択でもそちらを使います。
+
+アテンションの書き出し方（17.5 秒の音声、参照音声 + キャプション、RTX 4050 での実測）:
+
+- マスク付きアテンションをそのまま書き出すと、全部マスクされた行を 0 にするための `IsNaN` が入ります。
+  WebGPU には `IsNaN` がないため、アテンション層ごとにスコア行列を CPU に送って戻していました（DiT の 1 ステップ 276 ms のうち約 155 ms）。
+  書き出しスクリプトはマスクをスコアに足し込む形で書き出すので、`IsNaN` は入りません（Irodori のマスクは、結果に使う行には必ず有効なキーが残ります）
+- 効果: DiT の 1 ステップ 225 ms → 103 ms。合計は MeanFlow 版 3.7 秒 → 2.5 秒、通常版（RF, DiT fp16）33〜43 秒 → 14 秒、
+  CPU 実行（MeanFlow 版）18.2 秒 → 15.8 秒。音声は修正前とほぼ同じです（MeanFlow 版で SNR 79 dB）
+- **以前に書き出したモデルフォルダには効きません。** `export_onnx.py --only text_encoder speaker_encoder duration dit_step` で書き出し直してください。
+  `IsNaN` が残っていると、書き出し時に `[warn]` を表示します
+
+メモリと CPU（MeanFlow 版、17.5 秒の音声、WebGPU / RTX 4050 での実測）:
+
+- デコードは TorchSharp 版と同じく区切って行います（`OnnxInferenceRuntime.DecodeChunkFrames`）。
+  GPU メモリの最大使用量が 5.8 GB から 5.0 GB に、プロセスのメモリが 9.9 GB から 6.6 GB に減ります
+- GPU メモリをさらに減らしたいときは `--onnx-encoders-on-cpu`（`OnnxRuntimeOptions.EncoderDevice = OnnxDevice.Cpu`）を指定します。
+  5.0 GB から 3.3 GB に減る代わりに、1 回あたり約 1 秒遅くなります
+- ONNX Runtime のスレッドは、仕事を待つ間に空回りしない設定にしています。CPU 使用率は WebGPU で 10% → 2%、
+  CPU 実行では 71% → 35% に下がり、CPU 実行は 22.4 秒から 16.3 秒に速くなりました
 
 ONNX 版の制限:
 
@@ -283,7 +317,8 @@ dotnet test
 ```
 
 - `IrodoriTts.Tests`: テキスト正規化・トークナイザ・尺特徴量（Python 版のゴールデンデータ）と音声 DSP。
-  トークナイザのテストは `IRODORI_TOKENIZER_DIR`（`tokenizer.json` のあるフォルダ）か HF キャッシュがあるときに実行
+  トークナイザのテストは `IRODORI_TOKENIZER_DIR`（`tokenizer.json` のあるフォルダ）か HF キャッシュがあるときに実行。
+  `IRODORI_TEST_CODEC`（`weights.pth`）を設定すると、区切ったデコードが一度のデコードと一致するかも確認
 - `IrodoriTts.Server.Tests`: HTTP サーバーの全 API（偽エンジンで GPU 不要）。
   `IRODORI_TEST_CHECKPOINT`（`model.safetensors`）と `IRODORI_TEST_CODEC`（`weights.pth`）を設定すると、
   実モデルで HTTP → 合成 → WAV まで通すテストも実行（MeanFlow 版なら CPU で数十秒）

@@ -72,9 +72,40 @@ using (backend)
 {
     var app = ServerApp.Build(options, new BackendEngine(backend));
     Console.WriteLine($"[server] Irodori-TTS C# server listening on http://{options.Host}:{options.Port} (model='{options.ModelName}', voices='{Path.GetFullPath(options.VoicesDir)}')");
+    // In the background so the port opens at once; a request arriving meanwhile waits for it (synthesis is serialized).
+    // GPU only: the CPU has no kernel setup to amortize, and the warm-up would only hold up an early request.
+    bool onGpu = backend.Description.Contains("cuda", StringComparison.OrdinalIgnoreCase)
+        || backend.Description.Contains("webgpu", StringComparison.OrdinalIgnoreCase);
+    var warmup = onGpu && !opts.ContainsKey("no-warmup") ? Task.Run(() => Warmup(backend)) : Task.CompletedTask;
     await app.RunAsync(parentExited.Token);
+    await warmup;
 }
 return 0;
+
+// The first synthesis pays for CUDA / WebGPU kernel setup and for the codec encoder (~1 s on an RTX 4050).
+// Run it once at start-up: a short no-reference sentence, then one step with that audio as the reference so
+// the reference-encoding path is warm too.
+static void Warmup(TtsBackend backend)
+{
+    var watch = System.Diagnostics.Stopwatch.StartNew();
+    try
+    {
+        var first = backend.Synthesize(new SamplingRequest { Text = "こんにちは。", NoRef = true, Seed = 0, Seconds = 1.0 });
+        backend.Synthesize(new SamplingRequest
+        {
+            Text = "こんにちは。",
+            RefAudio = [new IrodoriTts.Audio.AudioData([first.Audio], first.SampleRate)],
+            NumSteps = 1,
+            Seed = 0,
+            Seconds = 1.0,
+        });
+        Console.WriteLine($"[warmup] done in {watch.Elapsed.TotalSeconds:F1} s");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[warmup] skipped: {ex.Message}");
+    }
+}
 
 /// <summary>Adapts the shared <see cref="TtsBackend"/> to the server's engine interface.</summary>
 internal sealed class BackendEngine(TtsBackend backend) : ISpeechEngine
@@ -100,6 +131,7 @@ internal static class Args
 
           --log-file <PATH>          Write the log to a file (for launches without a console)
           --parent-pid <PID>         Exit when that process exits
+          --no-warmup                Skip the background warm-up synthesis at start-up on a GPU (the first request is then ~1 s slower)
 
         Engine (same as the irodori-tts CLI):
           --backend auto|torch|onnx  --onnx-dir <DIR>  --onnx-device webgpu|cpu  --onnx-encoders-on-cpu

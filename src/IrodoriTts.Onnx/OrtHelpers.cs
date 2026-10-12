@@ -43,6 +43,10 @@ internal static class OrtHelpers
             LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_ERROR,
         };
         if (intraOpThreads is int n) so.IntraOpNumThreads = n;
+        // The intra-op threads busy-wait between operators by default. On the CPU that took 71% of 20 cores and
+        // was slower (22.4 s vs 16.3 s for 17.5 s of audio, MeanFlow); with WebGPU it cost 10% CPU for nothing.
+        so.AddSessionConfigEntry("session.intra_op.allow_spinning", "0");
+        so.AddSessionConfigEntry("session.inter_op.allow_spinning", "0");
         if (device == OnnxDevice.WebGpu)
         {
             var env = OrtEnv.Instance();

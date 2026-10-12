@@ -430,8 +430,7 @@ public sealed class OnnxInferenceRuntime : IDisposable
             // unpatchify (B, S, D*p) -> (B, S*p, D), then trim to the requested length
             var zb = new float[latentSteps * cfg.LatentDim];
             Array.Copy(z, (long)b * seqLen * patchedDim, zb, 0, zb.Length);
-            using var lat = OrtHelpers.Float(zb, new long[] { 1, latentSteps, cfg.LatentDim });
-            var audio = OrtHelpers.Run(_decoder, new Dictionary<string, OrtValue> { ["latent"] = lat }, "audio")[0].Data;
+            var audio = DecodeLatent(zb, latentSteps);
             long maxSamples = targetSamples;
             if (req.TrimTail)
             {
@@ -456,6 +455,42 @@ public sealed class OnnxInferenceRuntime : IDisposable
             UsedSeed = seed,
             Messages = messages,
         };
+    }
+
+    /// <summary>Latent frames decoded per pass; see <see cref="Codec.DacVaeCodec.DecodeChunkFrames"/>.</summary>
+    public int DecodeChunkFrames { get; set; } = 100;
+
+    /// <summary>Context frames decoded on each side of a chunk and dropped; see <see cref="Codec.DacVaeCodec.DecodeContextFrames"/>.</summary>
+    public int DecodeContextFrames { get; set; } = 12;
+
+    /// <summary>
+    /// (frames, latent_dim) latent → waveform, decoded in chunks so the decoder's 48 kHz activations
+    /// (and the GPU memory they take) stay bounded regardless of the utterance length.
+    /// </summary>
+    private float[] DecodeLatent(float[] latent, int frames)
+    {
+        int dim = _latentDim;
+        int chunk = DecodeChunkFrames;
+        int context = Math.Max(0, DecodeContextFrames);
+        if (chunk <= 0 || frames <= chunk + 2 * context)
+        {
+            using var lat = OrtHelpers.Float(latent, new long[] { 1, frames, dim });
+            return OrtHelpers.Run(_decoder, new Dictionary<string, OrtValue> { ["latent"] = lat }, "audio")[0].Data;
+        }
+
+        var output = new float[(long)frames * _hop];
+        for (int start = 0; start < frames; start += chunk)
+        {
+            int end = Math.Min(frames, start + chunk);
+            int from = Math.Max(0, start - context);
+            int to = Math.Min(frames, end + context);
+            var piece = new float[(to - from) * dim];
+            Array.Copy(latent, (long)from * dim, piece, 0, piece.Length);
+            using var lat = OrtHelpers.Float(piece, new long[] { 1, to - from, dim });
+            var audio = OrtHelpers.Run(_decoder, new Dictionary<string, OrtValue> { ["latent"] = lat }, "audio")[0].Data;
+            Array.Copy(audio, (long)(start - from) * _hop, output, (long)start * _hop, (long)(end - start) * _hop);
+        }
+        return output;
     }
 
     public void Dispose()
