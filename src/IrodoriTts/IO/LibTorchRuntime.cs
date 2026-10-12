@@ -205,6 +205,7 @@ public static class LibTorchRuntime
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Choosing LibTorch at start-up is Windows-only.");
         string dir = Path.GetFullPath(directory);
         if (!File.Exists(Path.Combine(dir, "torch_cpu.dll"))) throw new FileNotFoundException($"torch_cpu.dll not found in {dir}");
+        PreloadAppLocalVcRuntime();
         if (!SetDllDirectoryW(dir))
         {
             throw new IOException($"SetDllDirectory failed ({Marshal.GetLastWin32Error()}): {dir}");
@@ -219,6 +220,37 @@ public static class LibTorchRuntime
                 throw new IOException($"Could not load {path} (error {Marshal.GetLastWin32Error()}).");
             }
             _loadedAny = true;
+        }
+    }
+
+    /// <summary>
+    /// The VC++ runtime (msvcp140.dll, vcruntime140.dll ...) that LibTorch imports. Loading LibTorch by full path
+    /// with the altered search order takes the exe folder out of the search for its imports (LibTorch's folder,
+    /// the SetDllDirectory folder, then System32), so a copy shipped next to the exe would never be found and a
+    /// PC without the VC++ Redistributable could not load LibTorch at all. Loading the shipped copies first by
+    /// full path puts them in the process; later imports by name then reuse them. Nothing is loaded when the
+    /// copies are not shipped (the system's VC++ Redistributable is used as before).
+    /// </summary>
+    private static readonly string[] VcRuntime =
+    {
+        "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll",
+        "msvcp140_atomic_wait.dll", "concrt140.dll",
+    };
+
+    private static bool _vcRuntimePreloaded;
+
+    private static void PreloadAppLocalVcRuntime()
+    {
+        if (_vcRuntimePreloaded) return;
+        _vcRuntimePreloaded = true;
+        foreach (var name in VcRuntime)
+        {
+            string path = Path.Combine(AppContext.BaseDirectory, name);
+            if (File.Exists(path))
+            {
+                // A failure here is not fatal: LibTorch then looks for the runtime on its own as before.
+                LoadLibraryExW(path, IntPtr.Zero, 0);
+            }
         }
     }
 
