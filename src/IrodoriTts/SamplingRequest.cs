@@ -14,6 +14,9 @@ public sealed class SamplingRequest
     /// </summary>
     public Action<AudioChunk>? OnAudioChunk { get; set; }
 
+    /// <summary>A shallow copy (lists are shared), e.g. to synthesize the same settings for another piece of text.</summary>
+    public SamplingRequest Clone() => (SamplingRequest)MemberwiseClone();
+
     /// <summary>Style / voice-design caption (caption-conditioned checkpoints only).</summary>
     public string? Caption { get; set; }
 

@@ -19,4 +19,8 @@
     <ProjectReference Include="..\..\src\IrodoriTts.Server\IrodoriTts.Server.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="Data\**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

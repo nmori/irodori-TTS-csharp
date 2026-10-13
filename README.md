@@ -227,8 +227,22 @@ irodori-tts-server --voices-dir D:\voices --model-precision bf16    # 既定で 
   キャラクター作成画面（`/`）は届いた分から再生します。最初の音声が届くまで 1.5 秒を超えたとき（CPU など）は、
   途中で音が途切れないよう 3 秒分たまってから再生を始めます
 - 尺予測より手前で音声が終わる（末尾が平らになる）部分は、デコードせずに切り捨てます
+- 長い文章は句読点で分けて 1 つずつ合成し、つなげて返します（Python 版の Irodori-TTS-Server と同じ規則と名前）。
+  区切りは `。、，,．.!！?？` と改行で、空白を除いて `chunk_min_chars`（既定 80）文字以上たまった区切りで分けます。
+  `irodori.chunking_enabled`（または最上位の `chunking_enabled` / `chunking`）、`irodori.chunk_min_chars`、
+  `irodori.first_sentence_chunk_min_chars`（最初の区切りにだけ使う最小文字数）で指定でき、サーバーの既定は
+  `--chunking` / `--chunk-min-chars` / `--first-sentence-chunk-min-chars`（環境変数 `IRODORI_DEFAULT_CHUNKING_ENABLED` /
+  `IRODORI_DEFAULT_CHUNK_MIN_CHARS` / `IRODORI_DEFAULT_FIRST_SENTENCE_CHUNK_MIN_CHARS`）です。`irodori.seconds` を指定したときは分けません
+  - 分けた片はデコードしながら続けて返します（長さが最後まで決まらないので、WAV のヘッダーの長さは 0xFFFFFFFF の
+    ストリーミング形式）。シードを指定しないときも全部の片に同じシードを使い、`X-Irodori-Seed` で全体を再現できます
+  - 分けないと 1 回の合成は `max_seconds`（30 秒）に収められるため、長い文章は詰めて読まれていました。
+    188 文字の例で、分けないと 30.0 秒、分けると本来の 40.9 秒になります（RTX 4050 / WebGPU、最初の音声まで 0.85 秒 → 0.62 秒）。
+    `first_sentence_chunk_min_chars` を最初の文の長さ以下（例: 5）にすると、最初の文だけ先に合成して 0.28 秒になります
+  - `stream_format: "sse"` にも対応しました。片ごとに `audio_chunk`（`index`, `text`, `format`, `media_type`,
+    `audio_base64` = その片の完全な音声ファイル, `seed`, `total_to_decode`）を送り、最後に `done`（`chunks`）、
+    失敗したときは `error` を送ります
 - Python 版との違い: `response_format` は `wav` / `pcm` のみ（mp3 / flac / opus / aac は未対応）、
-  `stream_format: "sse"` と文単位の分割合成（`chunking_*`）、`lora_adapter`、`.pt` の参照潜在は未対応です
+  `lora_adapter`、`.pt` の参照潜在は未対応です
 
 ### 配布用の発行（CPU 版を同梱し、CUDA 版は必要な PC だけが取得）
 

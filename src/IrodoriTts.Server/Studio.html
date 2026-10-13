@@ -92,11 +92,27 @@ function unlockAudio() {  // call from the click itself: browsers only start aud
   if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
 }
 
+// Long input is streamed piece by piece with an open-ended WAV header (sizes 0xFFFFFFFF): write the real sizes
+// once the whole file is here, so players and the voice upload see a normal WAV.
+function wavBlob(parts) {
+  const bytes = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let at = 0;
+  for (const p of parts) { bytes.set(p, at); at += p.length; }
+  if (bytes.length >= 44) {
+    const view = new DataView(bytes.buffer);
+    if (view.getUint32(40, true) === 0xFFFFFFFF) {
+      view.setUint32(4, bytes.length - 8, true);
+      view.setUint32(40, bytes.length - 44, true);
+    }
+  }
+  return new Blob([bytes], { type: "audio/wav" });
+}
+
 async function synthesize(text, voice, seed, live) {
   const body = { model, input: text, voice, response_format: "wav" };
   if (seed !== undefined) body.irodori = { seed };
   const r = await api("/v1/audio/speech", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  if (!live || !audioCtx || !r.body) return { blob: await r.blob(), played: false };
+  if (!live || !audioCtx || !r.body) return { blob: wavBlob([new Uint8Array(await r.arrayBuffer())]), played: false };
   const reader = r.body.getReader();
   const parts = [];
   let header = new Uint8Array(0), carry = null, rate = 0, at = 0;
@@ -143,7 +159,7 @@ async function synthesize(text, voice, seed, live) {
     if (pending.reduce((sum, b) => sum + b.duration, 0) >= leadSeconds) { pending.forEach(play); pending = []; leadSeconds = 0; }
   }
   pending.forEach(play);
-  return { blob: new Blob(parts, { type: "audio/wav" }), played: true };
+  return { blob: wavBlob(parts), played: true };
 }
 
 function audioFor(blob, autoplay) {

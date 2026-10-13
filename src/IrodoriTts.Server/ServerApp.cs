@@ -30,6 +30,12 @@ public sealed class ServerOptions
     public Action<string> Log { get; init; } = Console.WriteLine;
     /// <summary>State of the downloadable ONNX model, shown as <c>onnx_model</c> in /health (null: not used on this PC).</summary>
     public Func<JsonObject?>? ModelStatus { get; init; }
+    /// <summary>Split long input into pieces (IRODORI_DEFAULT_CHUNKING_ENABLED; a request can override it).</summary>
+    public bool ChunkingEnabled { get; init; } = true;
+    /// <summary>Non-space characters a piece needs before it may end at a punctuation mark (IRODORI_DEFAULT_CHUNK_MIN_CHARS).</summary>
+    public int ChunkMinChars { get; init; } = 80;
+    /// <summary>The same for the first boundary only (IRODORI_DEFAULT_FIRST_SENTENCE_CHUNK_MIN_CHARS; null: ChunkMinChars).</summary>
+    public int? FirstSentenceChunkMinChars { get; init; }
 }
 
 /// <summary>
@@ -133,6 +139,23 @@ public static class ServerApp
             log($"[voices] could not prepare '{voice.Id}': {ex.Message}");
             return false;
         }
+    }
+
+    /// <summary>
+    /// The pieces to synthesize (Irodori-TTS-Server's options: <c>chunking_enabled</c> / <c>chunking</c>,
+    /// <c>chunk_min_chars</c>, <c>first_sentence_chunk_min_chars</c>, under <c>irodori</c> or at the top level).
+    /// A fixed <c>seconds</c> applies to the whole request, so it is never split.
+    /// </summary>
+    private static List<string> SpeechPieces(ServerOptions o, JsonObject body, JsonObject irodori, SamplingRequest req, string input)
+    {
+        JsonNode? Opt(params string[] names) => names.Select(n => irodori[n] ?? body[n]).FirstOrDefault(v => v is not null);
+        bool enabled = Opt("chunking_enabled", "chunking")?.GetValue<bool>() ?? o.ChunkingEnabled;
+        if (!enabled || req.Seconds is not null) return [input];
+        int minChars = Opt("chunk_min_chars")?.GetValue<int>() ?? o.ChunkMinChars;
+        if (minChars <= 0) throw new ArgumentException("chunk_min_chars must be greater than 0.");
+        int? firstMin = Opt("first_sentence_chunk_min_chars")?.GetValue<int>() ?? o.FirstSentenceChunkMinChars;
+        if (firstMin is <= 0) throw new ArgumentException("first_sentence_chunk_min_chars must be greater than 0.");
+        return SpeechChunker.Split(input, minChars, firstMin);
     }
 
     public static WebApplication Build(ServerOptions o, ISpeechEngine engine)
@@ -274,9 +297,10 @@ public static class ServerApp
             {
                 return Error(400, $"response_format '{format}' is not supported by the C# server (use wav or pcm).", param: "response_format");
             }
-            if (body["stream_format"]?.GetValue<string>() is string sf && sf.Equals("sse", StringComparison.OrdinalIgnoreCase))
+            string streamFormat = body["stream_format"]?.GetValue<string>()?.ToLowerInvariant() ?? "audio";
+            if (streamFormat is not ("audio" or "sse"))
             {
-                return Error(400, "stream_format 'sse' is not supported by the C# server.", param: "stream_format");
+                return Error(400, $"stream_format '{streamFormat}' is not supported (use audio or sse).", param: "stream_format");
             }
 
             string? voiceId = body["voice"] switch
@@ -347,16 +371,67 @@ public static class ServerApp
                 return Error(400, $"Invalid irodori option: {ex.Message}", param: "irodori");
             }
 
+            // Long input is synthesized piece by piece (Irodori-TTS-Server's chunking): the first audio then waits
+            // only for the first piece.
+            List<string> pieces;
+            try
+            {
+                pieces = SpeechPieces(o, body, irodori, req, input);
+            }
+            catch (Exception ex) when (ex is FormatException or InvalidOperationException or ArgumentException)
+            {
+                return Error(400, $"Invalid irodori option: {ex.Message}", param: "irodori");
+            }
+            // One seed for every piece, so the X-Irodori-Seed header reproduces the whole response.
+            if (pieces.Count > 1 && req.Seed is null) req.Seed = Random.Shared.NextInt64(long.MaxValue);
+            var response = http.HttpContext.Response;
+            var aborted = http.HttpContext.RequestAborted;
+            var sw = Stopwatch.StartNew();
+            SamplingRequest PieceRequest(string text)
+            {
+                var r = req.Clone();
+                r.Text = text;
+                return r;
+            }
+
+            if (streamFormat == "sse") return await SpeechEvents();
+
             // The runtime hands out the audio while it decodes (OnAudioChunk): the response starts with the first
             // piece instead of after the whole utterance. Errors before it (bad input, sampling) still become JSON
             // errors; a failure after it can only cut the connection.
             var chunks = Channel.CreateUnbounded<AudioChunk>(new UnboundedChannelOptions { SingleReader = true });
-            req.OnAudioChunk = c => chunks.Writer.TryWrite(c);
-            var sw = Stopwatch.StartNew();
-            var work = Task.Run(() => engine.Synthesize(req));
+            var work = Task.Run(() =>
+            {
+                if (pieces.Count == 1)
+                {
+                    req.OnAudioChunk = c => chunks.Writer.TryWrite(c);
+                    return engine.Synthesize(req);
+                }
+                var results = new List<SamplingResult>();
+                long offset = 0;
+                foreach (var piece in pieces)
+                {
+                    var r = PieceRequest(piece);
+                    long at = offset;
+                    // The length of the whole response is unknown until the last piece (TotalSamples = -1).
+                    r.OnAudioChunk = c => chunks.Writer.TryWrite(c with { Offset = at + c.Offset, TotalSamples = -1 });
+                    var result = engine.Synthesize(r);
+                    results.Add(result);
+                    offset += result.Audio.Length;
+                }
+                var audio = results.SelectMany(x => x.Audio).ToArray();
+                return new SamplingResult
+                {
+                    Audio = audio,
+                    Audios = [audio],
+                    SampleRate = results[0].SampleRate,
+                    StageTimings = results.SelectMany((x, i) => x.StageTimings.Select(t => ($"chunk_{i + 1}:{t.Stage}", t.Seconds))).ToList(),
+                    TotalToDecode = results.Sum(x => x.TotalToDecode),
+                    UsedSeed = results[0].UsedSeed,
+                    Messages = results.SelectMany(x => x.Messages).ToList(),
+                };
+            });
             _ = work.ContinueWith(t => { _ = t.Exception; chunks.Writer.TryComplete(); }, TaskScheduler.Default);
-            var response = http.HttpContext.Response;
-            var aborted = http.HttpContext.RequestAborted;
 
             if (!await chunks.Reader.WaitToReadAsync(CancellationToken.None))
             {
@@ -372,26 +447,30 @@ public static class ServerApp
                 }
                 LogSpeech(result.Audio.Length, result.SampleRate, result.UsedSeed);
                 SetHeaders(result.UsedSeed, result.SampleRate);
-                if (format == "pcm") return Results.Bytes(WavFile.ToPcm16Bytes(result.Audio), "audio/pcm");
-                using var ms = new MemoryStream();
-                WavFile.WritePcm16(ms, new[] { result.Audio }, result.SampleRate);
-                return Results.Bytes(ms.ToArray(), "audio/wav");
+                return Results.Bytes(Encode(result.Audio, result.SampleRate), format == "pcm" ? "audio/pcm" : "audio/wav");
             }
 
             chunks.Reader.TryPeek(out var head);
             SetHeaders(head!.Seed, head.SampleRate);
             response.ContentType = format == "pcm" ? "audio/pcm" : "audio/wav";
-            response.ContentLength = head.TotalSamples * 2 + (format == "pcm" ? 0 : 44);
+            if (head.TotalSamples >= 0) response.ContentLength = head.TotalSamples * 2 + (format == "pcm" ? 0 : 44);
+            long sent = 0;
             try
             {
-                if (format != "pcm") await response.Body.WriteAsync(WavFile.Pcm16Header(head.TotalSamples, 1, head.SampleRate), aborted);
+                if (format != "pcm")
+                {
+                    await response.Body.WriteAsync(head.TotalSamples >= 0
+                        ? WavFile.Pcm16Header(head.TotalSamples, 1, head.SampleRate)
+                        : WavFile.Pcm16StreamingHeader(1, head.SampleRate), aborted);
+                }
                 await foreach (var chunk in chunks.Reader.ReadAllAsync(aborted))
                 {
                     await response.Body.WriteAsync(WavFile.ToPcm16Bytes(chunk.Samples), aborted);
                     await response.Body.FlushAsync(aborted);
+                    sent += chunk.Samples.Length;
                 }
                 await work;
-                LogSpeech(head.TotalSamples, head.SampleRate, head.Seed);
+                LogSpeech(sent, head.SampleRate, head.Seed);
             }
             catch (OperationCanceledException) when (aborted.IsCancellationRequested)
             {
@@ -403,6 +482,80 @@ public static class ServerApp
                 http.HttpContext.Abort();
             }
             return Results.Empty;
+
+            byte[] Encode(float[] audio, int sampleRate)
+            {
+                if (format == "pcm") return WavFile.ToPcm16Bytes(audio);
+                using var ms = new MemoryStream();
+                WavFile.WritePcm16(ms, new[] { audio }, sampleRate);
+                return ms.ToArray();
+            }
+
+            // stream_format "sse" (Irodori-TTS-Server): one audio_chunk event per piece carrying a complete audio file,
+            // then done; a failure becomes an error event.
+            async Task<IResult> SpeechEvents()
+            {
+                response.ContentType = "text/event-stream";
+                response.Headers.CacheControl = "no-cache";
+                response.Headers["X-Accel-Buffering"] = "no";
+                int completed = 0;
+                long samples = 0, seed = 0;
+                int sampleRate = 0;
+                async Task Event(string name, JsonObject data)
+                {
+                    await response.WriteAsync($"event: {name}\ndata: {data.ToJsonString()}\n\n", aborted);
+                    await response.Body.FlushAsync(aborted);
+                }
+                try
+                {
+                    for (int i = 0; i < pieces.Count; i++)
+                    {
+                        var piece = pieces[i];
+                        var result = await Task.Run(() => engine.Synthesize(PieceRequest(piece)));
+                        (seed, sampleRate) = (result.UsedSeed, result.SampleRate);
+                        samples += result.Audio.Length;
+                        completed++;
+                        await Event("audio_chunk", new JsonObject
+                        {
+                            ["index"] = i,
+                            ["text"] = piece,
+                            ["format"] = format,
+                            ["media_type"] = format == "pcm" ? "audio/pcm" : "audio/wav",
+                            ["audio_base64"] = Convert.ToBase64String(Encode(result.Audio, result.SampleRate)),
+                            ["seed"] = result.UsedSeed,
+                            ["total_to_decode"] = result.TotalToDecode,
+                        });
+                    }
+                    await Event("done", new JsonObject { ["chunks"] = completed });
+                    if (sampleRate > 0) LogSpeech(samples, sampleRate, seed);
+                }
+                catch (OperationCanceledException) when (aborted.IsCancellationRequested)
+                {
+                    o.Log($"[speech] client disconnected after {sw.Elapsed.TotalSeconds:F2}s");
+                }
+                catch (Exception ex)
+                {
+                    bool bad = ex is ArgumentException or FileNotFoundException or InvalidDataException or NotSupportedException;
+                    o.Log($"[speech] failed while streaming events: {ex.Message}");
+                    try
+                    {
+                        await Event("error", new JsonObject
+                        {
+                            ["error"] = new JsonObject
+                            {
+                                ["message"] = ex.Message,
+                                ["type"] = bad ? "invalid_request_error" : "server_error",
+                                ["param"] = null,
+                                ["code"] = bad ? "invalid_request" : "stream_error",
+                            },
+                        });
+                    }
+                    catch (Exception) when (aborted.IsCancellationRequested)
+                    {
+                    }
+                }
+                return Results.Empty;
+            }
 
             void SetHeaders(long seed, int sampleRate)
             {

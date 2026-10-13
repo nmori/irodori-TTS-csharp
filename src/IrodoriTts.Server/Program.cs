@@ -55,6 +55,10 @@ var options = new ServerOptions
     DefaultVoice = Args.Str(opts, "default-voice") ?? Environment.GetEnvironmentVariable("IRODORI_DEFAULT_VOICE"),
     AllowNoRef = !Opt("allow-no-ref-voice", "IRODORI_ALLOW_NO_REF_VOICE", "true").Equals("false", StringComparison.OrdinalIgnoreCase),
     VoicesDir = Opt("voices-dir", "IRODORI_VOICES_DIR", "voices"),
+    ChunkingEnabled = !Opt("chunking", "IRODORI_DEFAULT_CHUNKING_ENABLED", "true").Equals("false", StringComparison.OrdinalIgnoreCase),
+    ChunkMinChars = int.Parse(Opt("chunk-min-chars", "IRODORI_DEFAULT_CHUNK_MIN_CHARS", "80"), CultureInfo.InvariantCulture),
+    FirstSentenceChunkMinChars = Opt("first-sentence-chunk-min-chars", "IRODORI_DEFAULT_FIRST_SENTENCE_CHUNK_MIN_CHARS", "") is { Length: > 0 } fs
+        ? int.Parse(fs, CultureInfo.InvariantCulture) : null,
 };
 
 TtsBackend backend;
@@ -219,6 +223,9 @@ internal static class Args
           --api-key <KEY>            IRODORI_API_KEY (Bearer token for /v1/*)
           --default-voice <ID>       IRODORI_DEFAULT_VOICE
           --allow-no-ref-voice <B>   IRODORI_ALLOW_NO_REF_VOICE, default true (voice "none")
+          --chunking <B>             IRODORI_DEFAULT_CHUNKING_ENABLED, default true: split long input at punctuation
+          --chunk-min-chars <N>      IRODORI_DEFAULT_CHUNK_MIN_CHARS, default 80 (non-space characters per piece)
+          --first-sentence-chunk-min-chars <N>  IRODORI_DEFAULT_FIRST_SENTENCE_CHUNK_MIN_CHARS (first boundary only)
 
           --log-file <PATH>          Write the log to a file (for launches without a console)
           --parent-pid <PID>         Exit when that process exits

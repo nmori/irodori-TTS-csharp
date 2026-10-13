@@ -175,6 +175,18 @@ public static class WavFile
         return h;
     }
 
+    /// <summary>
+    /// The header of a 16-bit PCM WAV stream whose length is not known yet: the RIFF and data sizes are 0xFFFFFFFF,
+    /// the usual convention for streamed WAV (readers take the data up to the end of the stream).
+    /// </summary>
+    public static byte[] Pcm16StreamingHeader(int channels, int sampleRate)
+    {
+        var h = Pcm16Header(0, channels, sampleRate);
+        BinaryPrimitives.WriteUInt32LittleEndian(h.AsSpan(4), uint.MaxValue);
+        BinaryPrimitives.WriteUInt32LittleEndian(h.AsSpan(40), uint.MaxValue);
+        return h;
+    }
+
     /// <summary>Mono samples as little-endian 16-bit PCM (no header).</summary>
     public static byte[] ToPcm16Bytes(ReadOnlySpan<float> samples)
     {
