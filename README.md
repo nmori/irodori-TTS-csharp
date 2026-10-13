@@ -206,7 +206,7 @@ irodori-tts-server --voices-dir D:\voices --model-precision bf16    # 既定で 
 - 環境変数も Python 版と同じ名前（`IRODORI_API_KEY`, `IRODORI_DEFAULT_VOICE`, `IRODORI_MODEL_NAME` など）
 - 参照音声の潜在表現はキャッシュします。起動後（GPU ではウォームアップの後）に声フォルダの全部の声を裏で 1 つずつ処理し、
   アップロードされた声もすぐ処理するので、どの声も最初のリクエストから速く返ります。
-  キャッシュは `%LOCALAPPDATA%\IrodoriTtseference-latents`（`IRODORI_TTS_CACHE` があればその下）にも保存し、
+  キャッシュは `%LOCALAPPDATA%\IrodoriTts\reference-latents`（`IRODORI_TTS_CACHE` があればその下）にも保存し、
   再起動後は読み込むだけです（10 声で初回 3.5 秒 → 2 回目以降 0.2 秒、合計 284 KB）。ファイルを書き換えた声と、
   エンコーダーや精度が変わったときは処理し直します
 - GPU で動かすときは、待ち受けを始めたあとに裏でウォームアップします（声なしで 10 秒分を逐次デコード、
