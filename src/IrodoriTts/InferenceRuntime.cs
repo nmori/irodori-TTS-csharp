@@ -27,6 +27,8 @@ public sealed class RuntimeOptions
     public string ModelPrecision { get; init; } = "fp32";
     public string CodecDevice { get; init; } = "cpu";
     public string CodecPrecision { get; init; } = "fp32";
+    /// <summary>Where encoded reference clips are kept across runs (null: memory only).</summary>
+    public string? ReferenceCacheDirectory { get; init; } = ReferenceLatentCache.DefaultDirectory;
 }
 
 /// <summary>
@@ -47,14 +49,15 @@ public sealed class InferenceRuntime : IDisposable
     private readonly int _defaultCaptionMaxLen;
     private readonly double _defaultMaxRefSeconds;
     private readonly int? _fixedTargetLatentSteps;
-    private readonly ReferenceLatentCache _refCache = new();
+    private readonly ReferenceLatentCache _refCache;
 
     public ModelConfig ModelConfig => _model.Config;
     public int SampleRate => _codec.SampleRate;
 
     private InferenceRuntime(TextToLatentRFDiT model, TextTokenizer tokenizer, TextTokenizer? captionTokenizer, DacVaeCodec codec,
-        Device modelDevice, int textMaxLen, int captionMaxLen, double maxRefSeconds, int? fixedTargetLatentSteps)
+        Device modelDevice, int textMaxLen, int captionMaxLen, double maxRefSeconds, int? fixedTargetLatentSteps, ReferenceLatentCache refCache)
     {
+        _refCache = refCache;
         _model = model;
         _tokenizer = tokenizer;
         _captionTokenizer = captionTokenizer;
@@ -174,7 +177,9 @@ public sealed class InferenceRuntime : IDisposable
         {
             throw new InvalidDataException($"Latent dimension mismatch: checkpoint latent_dim={cfg.LatentDim} but codec latent_dim={codec.LatentDim}.");
         }
-        return new InferenceRuntime(model, tokenizer, captionTokenizer, codec, modelDevice, textMaxLen, captionMaxLen, maxRef, fixedSteps);
+        var refCache = new ReferenceLatentCache(directory: options.ReferenceCacheDirectory,
+            encoderId: ReferenceLatentCache.DescribeEncoder([options.CodecWeights], $"torch|{codecDevice}|{codecDType}"));
+        return new InferenceRuntime(model, tokenizer, captionTokenizer, codec, modelDevice, textMaxLen, captionMaxLen, maxRef, fixedSteps, refCache);
     }
 
     private static int? GetInt(Dictionary<string, JsonNode?> cfg, string key) =>
@@ -377,6 +382,21 @@ public sealed class InferenceRuntime : IDisposable
     }
 
     /// <summary>Synthesize speech for one request. Thread-safe (requests are serialized).</summary>
+    /// <summary>
+    /// Encode the request's reference WAV files into the reference cache without synthesizing, so the first
+    /// request with that voice does not pay for it. Other reference kinds are ignored.
+    /// </summary>
+    public void PrepareReference(SamplingRequest req)
+    {
+        if (req.RefWavs is not { Count: > 0 } || req.NoRef) return;
+        lock (_lock)
+        {
+            using var inference = torch.inference_mode();
+            using var scope = torch.NewDisposeScope();
+            LoadReferenceLatent(req, 1, new List<string>());
+        }
+    }
+
     public SamplingResult Synthesize(SamplingRequest req, Action<string>? log = null)
     {
         lock (_lock)

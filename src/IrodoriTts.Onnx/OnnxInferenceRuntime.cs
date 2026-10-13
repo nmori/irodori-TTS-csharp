@@ -38,6 +38,9 @@ public sealed class OnnxRuntimeOptions
     /// </summary>
     public bool? DecoderFp16 { get; init; }
 
+    /// <summary>Where encoded reference clips are kept across runs (null: memory only).</summary>
+    public string? ReferenceCacheDirectory { get; init; } = ReferenceLatentCache.DefaultDirectory;
+
     /// <summary>
     /// Optional source of the initial standard-normal latent noise (seed, count → samples). Lets callers
     /// reproduce the noise of another backend; by default an internal xoshiro256** generator seeded with
@@ -65,7 +68,7 @@ public sealed class OnnxInferenceRuntime : IDisposable
     private readonly double _defaultMaxRefSeconds;
     private readonly int? _fixedTargetLatentSteps;
     private readonly float[] _embedTable;
-    private readonly ReferenceLatentCache _refCache = new();
+    private readonly ReferenceLatentCache _refCache;
     private readonly int _embedDim;
 
     public ModelConfig ModelConfig { get; }
@@ -118,6 +121,9 @@ public sealed class OnnxInferenceRuntime : IDisposable
         _speaker = OpenOptional("speaker_encoder", encDevice);
         _duration = OpenOptional("duration", encDevice);
         _encoder = OpenOptional("dacvae_encoder", encDevice);
+        _refCache = new ReferenceLatentCache(directory: options.ReferenceCacheDirectory,
+            encoderId: ReferenceLatentCache.DescribeEncoder(
+                [Path.Combine(dir, "dacvae_encoder.onnx"), Path.Combine(dir, "dacvae_encoder.onnx.data")], $"onnx|{encDevice}"));
         // dit_context.onnx + dit_step_kv.onnx project the conditioning K/V once per request; older exports only
         // have dit_step.onnx, which projects them in every layer of every step.
         if (File.Exists(Path.Combine(dir, "dit_context.onnx")))
@@ -301,6 +307,19 @@ public sealed class OnnxInferenceRuntime : IDisposable
         var state = outs[0];
         var smask = ToBool(outs[1].Data);
         return (new HostTensor(Repeat(state.Data, batch), new long[] { batch, state.Shape[1], state.Shape[2] }), Repeat(smask, batch));
+    }
+
+    /// <summary>
+    /// Encode the request's reference WAV files into the reference cache without synthesizing, so the first
+    /// request with that voice does not pay for it. Other reference kinds are ignored.
+    /// </summary>
+    public void PrepareReference(SamplingRequest req)
+    {
+        if (req.RefWavs is not { Count: > 0 } || req.NoRef || req.RefEmbed is not null) return;
+        lock (_lock)
+        {
+            PrepareSpeaker(req, 1, new List<string>());
+        }
     }
 
     /// <summary>Synthesize speech for one request. Thread-safe (requests are serialized).</summary>

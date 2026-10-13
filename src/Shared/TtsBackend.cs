@@ -21,6 +21,11 @@ internal sealed class TtsBackend(
 
     public SamplingResult Synthesize(SamplingRequest r, Action<string>? log = null) => synthesize(r, log);
 
+    /// <summary>Encode a request's reference clips ahead of time (no-op when the engine cannot).</summary>
+    public void PrepareReference(SamplingRequest r) => PrepareReferenceAction?.Invoke(r);
+
+    public Action<SamplingRequest>? PrepareReferenceAction { get; init; }
+
     /// <summary>The ONNX model folder in use (null on TorchSharp).</summary>
     public string? OnnxDirectory { get; init; }
 
@@ -148,7 +153,11 @@ internal sealed class TtsBackend(
         });
         log($"[load] done in {loadWatch.Elapsed.TotalSeconds:F1} s (model={modelDevice}, codec={codecDevice})");
         return new TtsBackend(runtime.Synthesize, runtime, $"torch ({modelDevice}, {precision})",
-            runtime.ModelConfig.IsMeanFlow, supportsSpeakerEmbedding: true) { OnnxAuto = onnxAuto };
+            runtime.ModelConfig.IsMeanFlow, supportsSpeakerEmbedding: true)
+        {
+            OnnxAuto = onnxAuto,
+            PrepareReferenceAction = runtime.PrepareReference,
+        };
     }
 
     /// <summary>Load an ONNX model folder (also used to switch to a freshly downloaded one).</summary>
@@ -170,6 +179,7 @@ internal sealed class TtsBackend(
         {
             OnnxDirectory = Path.GetFullPath(onnxDir),
             OnnxAuto = onnxAuto,
+            PrepareReferenceAction = onnx.PrepareReference,
         };
     }
 

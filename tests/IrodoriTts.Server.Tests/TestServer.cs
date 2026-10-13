@@ -32,6 +32,14 @@ public sealed class FakeEngine : ISpeechEngine
     /// <summary>When set, the engine waits for it after the first streamed piece.</summary>
     public SemaphoreSlim? HoldAfterFirstPiece { get; set; }
 
+    /// <summary>Requests passed to <see cref="PrepareReference"/>.</summary>
+    public List<SamplingRequest> Prepared { get; } = new();
+
+    public void PrepareReference(SamplingRequest request)
+    {
+        lock (Prepared) Prepared.Add(request);
+    }
+
     public SamplingResult Synthesize(SamplingRequest request)
     {
         lock (Requests) Requests.Add(request);

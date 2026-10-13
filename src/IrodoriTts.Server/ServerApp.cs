@@ -13,6 +13,9 @@ public interface ISpeechEngine
     string Description { get; }
     bool IsMeanFlow { get; }
     SamplingResult Synthesize(SamplingRequest request);
+
+    /// <summary>Encode the request's reference clips ahead of time (see <c>InferenceRuntime.PrepareReference</c>).</summary>
+    void PrepareReference(SamplingRequest request) { }
 }
 
 public sealed class ServerOptions
@@ -55,6 +58,19 @@ public sealed class SwitchableEngine(ISpeechEngine initial) : ISpeechEngine
         }
     }
 
+    public void PrepareReference(SamplingRequest request)
+    {
+        _lock.EnterReadLock();
+        try
+        {
+            _current.PrepareReference(request);
+        }
+        finally
+        {
+            _lock.ExitReadLock();
+        }
+    }
+
     /// <summary>Use <paramref name="next"/> from now on and return the previous engine (no synthesis is using it any more).</summary>
     public ISpeechEngine Swap(ISpeechEngine next)
     {
@@ -85,6 +101,39 @@ public static class ServerApp
         using var reader = new StreamReader(stream);
         return reader.ReadToEnd();
     });
+
+    /// <summary>
+    /// Encode the reference clips of every voice in <paramref name="voicesDir"/> (one voice at a time, so a request
+    /// waits for at most one clip), so no voice pays for it on its first request. With the on-disk reference cache
+    /// this is nearly free after the first run.
+    /// </summary>
+    public static void PrepareVoices(ISpeechEngine engine, string voicesDir, bool allowNoRef, Action<string> log, CancellationToken cancellationToken = default)
+    {
+        var watch = Stopwatch.StartNew();
+        int count = 0;
+        foreach (var voice in new VoiceStore(voicesDir, allowNoRef).List(out _))
+        {
+            if (cancellationToken.IsCancellationRequested) return;
+            if (PrepareVoice(engine, voice, log)) count++;
+        }
+        if (count > 0) log($"[voices] prepared {count} voice(s) in {watch.Elapsed.TotalSeconds:F1} s");
+    }
+
+    private static bool PrepareVoice(ISpeechEngine engine, VoiceSpec voice, Action<string> log)
+    {
+        if (voice.NoRef || voice.RefWavs.Count == 0) return false;
+        try
+        {
+            // The same request fields as /v1/audio/speech uses for this voice, so the cache key matches.
+            engine.PrepareReference(new SamplingRequest { Text = "-", RefWavs = voice.RefWavs.ToList() });
+            return true;
+        }
+        catch (Exception ex)
+        {
+            log($"[voices] could not prepare '{voice.Id}': {ex.Message}");
+            return false;
+        }
+    }
 
     public static WebApplication Build(ServerOptions o, ISpeechEngine engine)
     {
@@ -175,7 +224,9 @@ public static class ServerApp
             {
                 return Error(400, ex.Message, param: "file");
             }
-            return voices.Find(id) is { } saved ? Results.Json(VoiceJson(saved)) : Error(500, "Voice was saved but could not be resolved.", "server_error");
+            if (voices.Find(id) is not { } saved) return Error(500, "Voice was saved but could not be resolved.", "server_error");
+            _ = Task.Run(() => PrepareVoice(engine, saved, o.Log));  // ready before its first request
+            return Results.Json(VoiceJson(saved));
         }
 
         static string VoiceStoreStem(string name) =>

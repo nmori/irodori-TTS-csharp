@@ -90,6 +90,9 @@ try
     // GPU only: the CPU has no kernel setup to amortize, and the warm-up would only hold up an early request.
     bool warm = !opts.ContainsKey("no-warmup");
     var warmup = warm && OnGpu(backend) ? Task.Run(() => Warmup(backend)) : Task.CompletedTask;
+    // Then encode every voice's reference clips, so no voice is slow on its first request.
+    var prepare = warmup.ContinueWith(_ => ServerApp.PrepareVoices(engine, options.VoicesDir, options.AllowNoRef, Console.WriteLine, stopping.Token),
+        TaskScheduler.Default);
     // On a discrete non-NVIDIA GPU: download (or update) the ONNX model while serving, then switch to it.
     var onnxUpdate = backend.OnnxAuto is { } plan
         ? Task.Run(() => UpdateOnnxAsync(plan, warmup, warm, stopping.Token))
@@ -97,6 +100,7 @@ try
     await app.RunAsync(parentExited.Token);
     stopping.Cancel();
     await warmup;
+    await prepare;
     await onnxUpdate;
 }
 finally
@@ -131,7 +135,9 @@ async Task UpdateOnnxAsync(OnnxAutoPlan plan, Task warmup, bool warm, Cancellati
         var next = TtsBackend.LoadOnnx(dir, plan.Device, key => Args.Str(opts, key), key => opts.ContainsKey(key),
             Console.WriteLine, plan);
         if (warm) Warmup(next);
-        var previous = (BackendEngine)engine.Swap(new BackendEngine(next));
+        var nextEngine = new BackendEngine(next);
+        ServerApp.PrepareVoices(nextEngine, options.VoicesDir, options.AllowNoRef, Console.WriteLine, cancellationToken);
+        var previous = (BackendEngine)engine.Swap(nextEngine);
         previous.Backend.Dispose();
         onnxStatus.Value = Ready(dir);
         Console.WriteLine($"[onnx] now synthesizing with {next.Description}");
@@ -150,21 +156,30 @@ async Task UpdateOnnxAsync(OnnxAutoPlan plan, Task warmup, bool warm, Cancellati
 }
 
 // The first synthesis pays for CUDA / WebGPU kernel setup and for the codec encoder (~1 s on an RTX 4050).
-// Run it once at start-up: a short no-reference sentence, then one step with that audio as the reference so
+// Run it once at start-up: a no-reference sentence, then one step with (1 s of) that audio as the reference so
 // the reference-encoding path is warm too.
 static void Warmup(TtsBackend backend)
 {
     var watch = System.Diagnostics.Stopwatch.StartNew();
     try
     {
-        var first = backend.Synthesize(new SamplingRequest { Text = "こんにちは。", NoRef = true, Seed = 0, Seconds = 1.0 });
+        // 10 s, streamed: the decoder then runs the pass sizes requests use (1 s, 2 s, 4 s). WebGPU compiles kernels
+        // for the shapes it meets, and the first request otherwise paid ~0.4 s for them.
+        var first = backend.Synthesize(new SamplingRequest
+        {
+            Text = "こんにちは。今日は良い天気ですね。",
+            NoRef = true,
+            Seed = 0,
+            Seconds = 10.0,
+            OnAudioChunk = _ => { },
+        });
         backend.Synthesize(new SamplingRequest
         {
             Text = "こんにちは。",
-            RefAudio = [new IrodoriTts.Audio.AudioData([first.Audio], first.SampleRate)],
+            RefAudio = [new IrodoriTts.Audio.AudioData([first.Audio[..Math.Min(first.Audio.Length, first.SampleRate)]], first.SampleRate)],
             NumSteps = 1,
             Seed = 0,
-            Seconds = 1.0,
+            OnAudioChunk = _ => { },  // no Seconds: the duration predictor's first run took ~0.5 s
         });
         Console.WriteLine($"[warmup] done in {watch.Elapsed.TotalSeconds:F1} s");
     }
@@ -188,6 +203,7 @@ internal sealed class BackendEngine(TtsBackend backend) : ISpeechEngine
     public string Description => backend.Description;
     public bool IsMeanFlow => backend.IsMeanFlow;
     public SamplingResult Synthesize(SamplingRequest request) => backend.Synthesize(request);
+    public void PrepareReference(SamplingRequest request) => backend.PrepareReference(request);
 }
 
 internal static class Args

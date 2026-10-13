@@ -257,6 +257,24 @@ public class ServerApiTests
         });
     }
 
+    [Fact]
+    public async Task PrepareVoices_EncodesEveryClipVoiceWithTheSpeechRequestFields()
+    {
+        await using var s = await TestServer.StartAsync(prepareVoices: Voices);
+
+        ServerApp.PrepareVoices(s.Engine, s.VoicesDir, allowNoRef: true, _ => { });
+
+        var prepared = s.Engine.Prepared.Select(r => string.Join(",", r.RefWavs!.Select(Path.GetFileName))).OrderBy(x => x).ToList();
+        Assert.Contains("alice.wav", prepared);
+        Assert.Contains("bob1.wav,bob2.wav", prepared);
+        Assert.DoesNotContain(s.Engine.Prepared, r => r.NoRef || r.RefEmbed is not null);
+        // The cache key covers these fields: they must be what /v1/audio/speech sends for the same voice.
+        await s.SpeechAsync(Speech("alice"));
+        var speech = s.Engine.Requests.Single();
+        var alice = s.Engine.Prepared.Single(r => r.RefWavs!.SequenceEqual(speech.RefWavs!));
+        Assert.Equal((speech.RefNormalizeDb, speech.RefEnsureMax, speech.MaxRefSeconds), (alice.RefNormalizeDb, alice.RefEnsureMax, alice.MaxRefSeconds));
+    }
+
     public static TheoryData<string, HttpStatusCode, string> BadRequests => new()
     {
         { """{"model":"tts-1","input":"x","voice":"alice"}""", HttpStatusCode.NotFound, "model" },
