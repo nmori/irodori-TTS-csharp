@@ -13,7 +13,7 @@ An existing irodori-onnx.json in --out is kept and only the entry with the same 
 
 Usage:
     python package_onnx.py --model-dir D:\\models\\irodori-v4.1-small-mf-onnx --out D:\\models\\upload \\
-        --id irodori-v4.1-small-mf --version 20261012 --base-url https://machanbazaar.com/model/
+        --id irodori-v4.1-small-mf --version 20261012 --base-url https://github.com/nmori/irodori-TTS-csharp/releases/download/onnx-models/
 """
 from __future__ import annotations
 

@@ -27,6 +27,7 @@ src/Shared/                     CLI とサーバーで共有する実行方式�
 src/IrodoriTts.Cli/             infer.py 相当の CLI (irodori-tts)
 tests/IrodoriTts.Tests/         xUnit テスト（Python 版から生成したゴールデンデータ）
 tests/IrodoriTts.Server.Tests/  HTTP サーバーのテスト（偽エンジン / 実モデル）
+samples/SpeakServer/            サンプル: URL でテキストとシードを渡すとスピーカーで読み上げる HTTP サーバー
 tools/parity/                   Python 版との数値比較ツール
 tools/onnx_export/              ONNX 書き出しスクリプト（IrodoriTts.Onnx 用）
 ```
@@ -121,6 +122,7 @@ WavFile.WritePcm16("out.wav", new[] { result.Audio }, result.SampleRate);  // 48
 - `InferenceRuntime` はスレッドセーフです（内部でリクエストを直列化）。一度ロードして使い回してください。
 - メモリ上の音声を参照に使う場合は `RefAudio = new[] { new AudioData(samples, sampleRate) }`。
 - ローカルファイルから読む場合は `InferenceRuntime.Load(new RuntimeOptions { Checkpoint = ..., CodecWeights = ... })`。
+- 動くサンプル: [samples/SpeakServer](samples/SpeakServer/README.md)（`http://127.0.0.1:8089/speak?text=こんにちは&seed=42` でスピーカーから読み上げ）
 
 ## 検証結果
 
@@ -287,7 +289,7 @@ dotnet publish src/IrodoriTts.Server -c Release -r win-x64 --self-contained true
 `irodori-tts-server` が ONNX モデル（MeanFlow 版、約 3 GB）を自動で取得して切り替えます。
 
 1. 起動直後は、すぐ使える TorchSharp CPU + MeanFlow 版で受け付けます
-2. 裏で `https://machanbazaar.com/model/irodori-onnx.json` を読み、分割 ZIP を `%LOCALAPPDATA%\IrodoriTts\onnx`
+2. 裏で `https://github.com/nmori/irodori-TTS-csharp/releases/download/onnx-models/irodori-onnx.json` を読み、分割 ZIP を `%LOCALAPPDATA%\IrodoriTts\onnx`
    （`IRODORI_TTS_CACHE` があればその下の `onnx`）に取得します。分割ファイルごとと ZIP 全体の SHA-256 を確かめ、
    途中で切れたら続きから取り直します。取得中の空き容量は約 7 GB 必要です
 3. 展開して完了の印を書いたら、ONNX モデルを読み込んでウォームアップし、合成の合間に切り替えます

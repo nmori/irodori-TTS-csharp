@@ -35,7 +35,7 @@ public sealed record OnnxModelStatus(
 /// </summary>
 public static partial class OnnxModelStore
 {
-    public const string DefaultManifestUrl = "https://machanbazaar.com/model/irodori-onnx.json";
+    public const string DefaultManifestUrl = "https://github.com/nmori/irodori-TTS-csharp/releases/download/onnx-models/irodori-onnx.json";
     public const string DefaultModelId = "irodori-v4.1-small-mf";
     public const int ManifestFormatVersion = 1;
     private const string CompleteMarker = ".complete";

@@ -64,10 +64,19 @@ ONNX Runtime 1.30 + WebGPU EP 0.4.0 では、次の状況でエラーメッセ�
 
 ```bash
 python package_onnx.py --model-dir D:\models\irodori-v4.1-small-mf-onnx --out D:\models\upload \
-    --id irodori-v4.1-small-mf --version 20261012 --base-url https://machanbazaar.com/model/
+    --id irodori-v4.1-small-mf --version 20261012 --base-url https://github.com/nmori/irodori-TTS-csharp/releases/download/onnx-models/
 ```
 
 - `--out` に `<フォルダ名>-<版>.zip.001`〜（既定 200 MiB ずつ）と `irodori-onnx.json` を作ります。すべて `--base-url` の場所へ置きます
+- サーバーの既定の取得先は、このリポジトリの GitHub Releases のタグ `onnx-models` です（アプリのリリースとは別のタグ。
+  1 ファイル 2 GiB 未満の制限は分割で収まります）。置き方:
+
+  ```bash
+  gh release create onnx-models --title "ONNX models" --notes "irodori-tts-server が取得する ONNX モデル" --latest=false  # 初回だけ
+  gh release upload onnx-models D:/models/upload/*.zip.0*                  # 新しい版の分割ファイル
+  gh release upload onnx-models D:/models/upload/irodori-onnx.json --clobber  # 一覧は同じ名前で上書き
+  ```
+
 - ZIP の中は `<フォルダ名>/` にモデル一式、`<フォルダ名>/LICENSES/` に README.txt（元のモデル・ライセンス・倫理上の注意）と
   `licenses/` のライセンス本文（MIT: Aratako, SB Intuitions / Apache-2.0: Meta の DACVAE）
 - ZIP の分割はバイト単位なので、つなげれば普通の ZIP です（`copy /b a.zip.001 + a.zip.002 ... a.zip`、または 7-Zip で `.001` を開く）

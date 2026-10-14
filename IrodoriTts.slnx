@@ -1,4 +1,7 @@
 <Solution>
+  <Folder Name="/samples/">
+    <Project Path="samples/SpeakServer/SpeakServer.csproj" />
+  </Folder>
   <Folder Name="/src/">
     <Project Path="src/IrodoriTts.Cli/IrodoriTts.Cli.csproj" />
     <Project Path="src/IrodoriTts.Onnx/IrodoriTts.Onnx.csproj" />

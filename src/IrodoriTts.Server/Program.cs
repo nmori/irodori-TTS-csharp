@@ -248,7 +248,7 @@ internal static class Args
         Later starts use it directly and pick up a newer version listed in the manifest. Progress: /health "onnx_model".
           --no-onnx-download         Do not download or update it (an installed one is still used)
           --onnx-auto                Use it on any PC (also NVIDIA / no discrete GPU; the CPU runs it without a discrete GPU)
-          --onnx-manifest-url <URL>  IRODORI_ONNX_MANIFEST_URL, default https://machanbazaar.com/model/irodori-onnx.json
+          --onnx-manifest-url <URL>  IRODORI_ONNX_MANIFEST_URL, default https://github.com/nmori/irodori-TTS-csharp/releases/download/onnx-models/irodori-onnx.json
           --onnx-model <ID>          Model id in the manifest, default irodori-v4.1-small-mf
           --onnx-store <DIR>         Where it is kept, default %IRODORI_TTS_CACHE%\onnx or %LOCALAPPDATA%\IrodoriTts\onnx
         """;
