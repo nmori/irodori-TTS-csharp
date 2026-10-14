@@ -24,5 +24,16 @@ dotnet run --project samples/SpeakServer -c Release -p:TorchBackend=cuda # NVIDI
 - スピーカーでの再生は Windows のみです（`PlaySound`）。ほかの OS では `/wav` を使ってください
 - 速度の目安（CPU, i7-13700H）: 3 秒の文で 3〜4 秒
 
+## 配布用の発行
+
+```powershell
+dotnet publish samples/SpeakServer -c Release -r win-x64 --self-contained true -o out\SpeakServer
+```
+
+- .NET ランタイム込みで約 380 MB です（.NET のインストールは不要）。`bin\Release\net10.0` は Linux / macOS 用の
+  LibTorch も入って約 1 GB になるので、配布には使わないでください
+- `license\` に同梱物とモデルのライセンス一式が入ります（一覧は [license/README.txt](license/README.txt)）。
+  依存パッケージの版を上げたときは、このフォルダの本文も差し替えてください
+
 コードは [Program.cs](Program.cs) の 1 ファイルです。モデルの読み込みは `InferenceRuntime.FromHuggingFaceAsync`、
 合成は `Synthesize(new SamplingRequest { Text, Seed, NoRef / RefWavs })` だけです。

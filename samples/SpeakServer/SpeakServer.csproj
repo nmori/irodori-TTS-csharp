@@ -17,6 +17,13 @@
     <None Include="..\..\src\IrodoriTts.Server\voices\*.wav" Link="voices\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Licenses of everything in the win-x64 package (see license\README.txt), plus the downloaded models' -->
+    <None Include="license\*.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="..\..\LICENSE" Link="license\Irodori-TTS-csharp_MIT.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="..\..\tools\onnx_export\licenses\*.txt" Link="license\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <ItemGroup Condition="'$(TorchBackend)' == 'cpu'">
     <PackageReference Include="TorchSharp-cpu" Version="0.107.0" />
   </ItemGroup>

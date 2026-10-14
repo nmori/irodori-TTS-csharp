@@ -8,3 +8,4 @@ TestResults/
 # Preset characters shipped with the server
 !src/IrodoriTts.Server/voices/*.wav
 __pycache__/
+out/
