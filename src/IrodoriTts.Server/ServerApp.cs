@@ -445,7 +445,7 @@ public static class ServerApp
                 {
                     return Error(400, ex.Message);
                 }
-                LogSpeech(result.Audio.Length, result.SampleRate, result.UsedSeed);
+                LogSpeech(result.Audio.Length, result.SampleRate, result.UsedSeed, result.Audio);
                 SetHeaders(result.UsedSeed, result.SampleRate);
                 return Results.Bytes(Encode(result.Audio, result.SampleRate), format == "pcm" ? "audio/pcm" : "audio/wav");
             }
@@ -455,6 +455,9 @@ public static class ServerApp
             response.ContentType = format == "pcm" ? "audio/pcm" : "audio/wav";
             if (head.TotalSamples >= 0) response.ContentLength = head.TotalSamples * 2 + (format == "pcm" ? 0 : 44);
             long sent = 0;
+            // The start of the audio, kept for the pitch check in the log (SpeechDiagnostics).
+            var analysis = new List<float>();
+            int analysisLimit = head.SampleRate * SpeechDiagnostics.AnalysisSeconds;
             try
             {
                 if (format != "pcm")
@@ -468,9 +471,13 @@ public static class ServerApp
                     await response.Body.WriteAsync(WavFile.ToPcm16Bytes(chunk.Samples), aborted);
                     await response.Body.FlushAsync(aborted);
                     sent += chunk.Samples.Length;
+                    if (analysis.Count < analysisLimit)
+                    {
+                        analysis.AddRange(chunk.Samples.AsSpan(0, Math.Min(chunk.Samples.Length, analysisLimit - analysis.Count)));
+                    }
                 }
                 await work;
-                LogSpeech(sent, head.SampleRate, head.Seed);
+                LogSpeech(sent, head.SampleRate, head.Seed, analysis.ToArray());
             }
             catch (OperationCanceledException) when (aborted.IsCancellationRequested)
             {
@@ -501,6 +508,7 @@ public static class ServerApp
                 int completed = 0;
                 long samples = 0, seed = 0;
                 int sampleRate = 0;
+                float[]? firstAudio = null;
                 async Task Event(string name, JsonObject data)
                 {
                     await response.WriteAsync($"event: {name}\ndata: {data.ToJsonString()}\n\n", aborted);
@@ -514,6 +522,7 @@ public static class ServerApp
                         var result = await Task.Run(() => engine.Synthesize(PieceRequest(piece)));
                         (seed, sampleRate) = (result.UsedSeed, result.SampleRate);
                         samples += result.Audio.Length;
+                        firstAudio ??= result.Audio;
                         completed++;
                         await Event("audio_chunk", new JsonObject
                         {
@@ -527,7 +536,7 @@ public static class ServerApp
                         });
                     }
                     await Event("done", new JsonObject { ["chunks"] = completed });
-                    if (sampleRate > 0) LogSpeech(samples, sampleRate, seed);
+                    if (sampleRate > 0) LogSpeech(samples, sampleRate, seed, firstAudio);
                 }
                 catch (OperationCanceledException) when (aborted.IsCancellationRequested)
                 {
@@ -563,8 +572,31 @@ public static class ServerApp
                 response.Headers["X-Irodori-Sample-Rate"] = sampleRate.ToString(CultureInfo.InvariantCulture);
             }
 
-            void LogSpeech(long samples, int sampleRate, long seed) =>
+            void LogSpeech(long samples, int sampleRate, long seed, float[]? audio)
+            {
                 o.Log($"[speech] voice={voiceId ?? "(ref)"} chars={input.Length} audio={samples / (double)sampleRate:F2}s took={sw.Elapsed.TotalSeconds:F2}s seed={seed}");
+                // What was used and what came out, to tell a wrong voice / engine problem from a playback problem
+                // (e.g. "the voice is much lower on another PC"). Never fails the request.
+                try
+                {
+                    string refs = req.NoRef ? "none (no reference)"
+                        : req.RefEmbed is not null ? $"speaker-embedding {Path.GetFileName(req.RefEmbed)}"
+                        : req.RefWavs is { Count: > 0 } ? SpeechDiagnostics.DescribeReferences(req.RefWavs)
+                        : "(none)";
+                    o.Log($"[diag] backend={engine.Description} meanflow={engine.IsMeanFlow} ref={refs} " +
+                          $"steps={req.NumSteps?.ToString(CultureInfo.InvariantCulture) ?? "default"} speed={speed.ToString(CultureInfo.InvariantCulture)} " +
+                          $"cfg={req.CfgScale?.ToString(CultureInfo.InvariantCulture) ?? $"{req.CfgScaleText.ToString(CultureInfo.InvariantCulture)}/{req.CfgScaleSpeaker.ToString(CultureInfo.InvariantCulture)}/{req.CfgScaleCaption.ToString(CultureInfo.InvariantCulture)}"}" +
+                          $"{(req.Caption is null ? "" : $" caption=\"{req.Caption}\"")} pieces={pieces.Count}");
+                    if (audio is { Length: > 0 })
+                    {
+                        o.Log($"[diag] {SpeechDiagnostics.DescribeOutput(audio, sampleRate, req.NoRef || req.RefEmbed is not null ? null : req.RefWavs?.ToList())}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    o.Log($"[diag] skipped: {ex.Message}");
+                }
+            }
         }
 
         app.MapFallback(() => Error(404, "Not found."));

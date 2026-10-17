@@ -61,6 +61,15 @@ var options = new ServerOptions
         ? int.Parse(fs, CultureInfo.InvariantCulture) : null,
 };
 
+// The port is opened only after the model has loaded (seconds to minutes). Check it is free first, so that when
+// another server already holds it (e.g. a second app on the same PC) we exit at once with a code the launcher
+// recognizes (Speech.dll then starts again on a free port) instead of loading the model for nothing.
+if (!PortIsFree(options.Host, options.Port))
+{
+    Console.Error.WriteLine($"error: port {options.Port} on {options.Host} is already in use.");
+    return 3;   // IrodoriTTSServerLauncher.ExitCodePortInUse
+}
+
 TtsBackend backend;
 try
 {
@@ -71,6 +80,23 @@ catch (Exception ex) when (ex is ArgumentException or FileNotFoundException or I
 {
     Console.Error.WriteLine($"error: {ex.Message}");
     return 1;
+}
+
+// The machine and the engine in use, so a report from another PC can be judged from this log alone.
+try
+{
+    Console.WriteLine($"[diag] {SpeechDiagnostics.DescribeMachine()}");
+    Console.WriteLine($"[diag] nvidia-driver={LibTorchRuntime.HasNvidiaDriver} cuda={TorchSharp.torch.cuda.is_available()} " +
+                      $"cuda-devices={(TorchSharp.torch.cuda.is_available() ? TorchSharp.torch.cuda.device_count() : 0)}");
+    foreach (var a in IrodoriTts.Onnx.OnnxInferenceRuntime.ListWebGpuAdapters())
+    {
+        Console.WriteLine($"[diag] gpu: {a.Description} (vendor {a.Vendor}, {(a.Discrete ? "discrete" : "integrated")}, {a.VideoMemoryMB} MB)");
+    }
+    Console.WriteLine($"[diag] backend={backend.Description} meanflow={backend.IsMeanFlow}");
+}
+catch (Exception ex)
+{
+    Console.WriteLine($"[diag] machine info skipped: {ex.Message}");
 }
 
 var engine = new SwitchableEngine(new BackendEngine(backend));
@@ -112,6 +138,24 @@ finally
     ((BackendEngine)engine.Current).Backend.Dispose();
 }
 return 0;
+
+static bool PortIsFree(string host, int port)
+{
+    try
+    {
+        var address = host.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+            ? System.Net.IPAddress.Loopback
+            : System.Net.IPAddress.TryParse(host, out var parsed) ? parsed : System.Net.IPAddress.Any;
+        var listener = new System.Net.Sockets.TcpListener(address, port) { ExclusiveAddressUse = true };
+        listener.Start();
+        listener.Stop();
+        return true;
+    }
+    catch (System.Net.Sockets.SocketException)
+    {
+        return false;
+    }
+}
 
 static bool OnGpu(TtsBackend b) =>
     b.Description.Contains("cuda", StringComparison.OrdinalIgnoreCase) || b.Description.Contains("webgpu", StringComparison.OrdinalIgnoreCase);
