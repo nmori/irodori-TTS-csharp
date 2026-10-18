@@ -222,7 +222,7 @@ irodori-tts-server --voices-dir D:\voices --model-precision bf16    # 既定で 
 | --- | --- |
 | `GET /health` | 状態（読み込み済みのモデル、実行方式など） |
 | `GET /v1/models` | モデル ID（既定 `irodori-tts`） |
-| `POST /v1/audio/speech` | 合成。`model`, `input`, `voice`, `response_format`（`wav` / `pcm` / `flac`）, `speed`, `irodori`（本家と同じ全オプション。下記） |
+| `POST /v1/audio/speech` | 合成。`model`, `input`, `voice`, `response_format`（`wav` / `pcm` / `flac` / `opus` / `mp3` / `aac`）, `speed`, `irodori`（本家と同じ全オプション。下記） |
 | `GET /v1/audio/voices` | 声の一覧（`data[].id`） |
 | `POST` / `PUT` / `GET` / `DELETE /v1/audio/voices[/{id}]` | 声ファイルのアップロード・取得・削除 |
 
@@ -286,9 +286,13 @@ irodori-tts-server --voices-dir D:\voices --model-precision bf16    # 既定で 
   `none` のほか `no_ref` / `no-ref` / `null` / `text-only` も参照なしの声です
 - `response_format: "flac"` は純 C# のエンコーダーで作ります（可逆。WAV の約 4 割の大きさ。ffmpeg と libsndfile で
   デコードして WAV とビット単位で同じことを確認）。FLAC はデコードしながらではなく、でき上がってから返します
+- `opus` は Ogg Opus（RFC 7845）です。符号化は Concentus（libopus の C# 移植、BSD-3-Clause）、Ogg への格納はこのリポジトリの実装で、
+  64 kbps（VBR）、20 ms のフレームです。ffmpeg と libsndfile でエラーなくデコードでき、長さも WAV とサンプル単位で同じです
+  （WAV の約 1/12 の大きさ。対数メルスペクトルの差 0.35、Whisper の書き起こしも同じ）
+- `mp3` / `aac` は、PATH にある ffmpeg（または環境変数 `IRODORI_FFMPEG`）を別のプロセスとして使います（本家と同じ
+  libmp3lame / aac）。ffmpeg は同梱もリンクもしていません。見つからないときは 400 と理由を返します
 - `irodori.lora_adapter` で LoRA アダプターのフォルダを指定できます（[下記](#lora-アダプター)。TorchSharp 版のみ）
-- Python 版との違い: mp3 / opus / aac は未対応です（ネイティブのエンコーダーが要るため）。
-  状態コードは以前のこのサーバーのまま（不明なモデル・声は 404。本家は 400 / 422）です
+- Python 版との違い: 状態コードは以前のこのサーバーのまま（不明なモデル・声は 404。本家は 400 / 422）です
 
 ### 配布用の発行（CPU 版を同梱し、CUDA 版は必要な PC だけが取得）
 
@@ -554,3 +558,13 @@ dotnet test
 
 コードは元リポジトリと同じ MIT License です（`LICENSE` を参照、Copyright (c) 2026 Aratako）。
 モデルの重みのライセンスは各 HuggingFace モデルカード（[Irodori-TTS-v4.1-Small](https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small) など）に従ってください。
+v4-Large は Google の T5Gemma 2 を含むため、Gemma の利用規約（Gemma Terms of Use / Prohibited Use Policy）にも従ってください。
+
+- 移植したコードは、本家（Irodori-TTS / Irodori-TTS-Server、MIT）からの移植と、ファイル形式・論文・仕様（safetensors、
+  torchao の量子化の格納形式、PEFT の LoRA、T5Gemma 2 / Gemma のトークナイザー、FLAC、Ogg / Opus の RFC）からの独自の実装です。
+  他のライセンスのコード（torchao は BSD-3-Clause、PEFT・transformers は Apache-2.0）は写していません。これらは
+  `tools/parity` の検証スクリプトで、比較の相手として使うだけです（配布物には入りません）
+- サーバーと CLI の発行物には、含まれるすべての第三者のファイルのライセンスを `license\`（`src/IrodoriTts.Server/license/README.txt`）として
+  同梱します。ONNX Runtime の WebGPU EP に入っている `dxil.dll` は Microsoft の再頒布可能コードで、受け取る人・再配布する人には
+  その条件（Microsoft とそのソフトウェアを保護する条件）が付きます。`dxcompiler.dll` は LLVM の NCSA ライセンスです
+- 依存を加えるときは MIT / BSD などの許容型のものに限り、GPL / LGPL のもの（LAME、ffmpeg など）はリンク・同梱しません

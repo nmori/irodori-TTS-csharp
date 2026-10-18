@@ -5,7 +5,7 @@ namespace IrodoriTts.Audio;
 /// <summary>
 /// Minimal lossless FLAC encoder for mono 16-bit audio (no native dependencies). Each 4096-sample block is coded
 /// with the best of the constant / fixed-predictor (order 0–4) / verbatim subframes, with partitioned Rice
-/// residuals. The samples are the same 16-bit values <see cref="WavFile.WritePcm16"/> writes.
+/// residuals. The samples are the same 16-bit values <see cref="WavFile.ToPcm16"/> writes.
 /// </summary>
 public static class FlacEncoder
 {

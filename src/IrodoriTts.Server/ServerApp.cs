@@ -345,6 +345,7 @@ public static class ServerApp
             {
                 return Error(400, $"response_format '{format}' is not supported by the C# server (use {AudioFormats.SupportedList}).", param: "response_format");
             }
+            if (AudioFormats.Unavailable(format) is string unavailable) return Error(400, unavailable, param: "response_format");
             string streamFormat = body["stream_format"]?.GetValue<string>()?.ToLowerInvariant() ?? "audio";
             if (streamFormat is not ("audio" or "sse"))
             {

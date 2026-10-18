@@ -147,6 +147,93 @@ public class SpeechOptionsTests
     }
 
     [Fact]
+    public async Task OpusResponseIsAValidOggOpusStream()
+    {
+        await using var s = await TestServer.StartAsync(prepareVoices: Voices);
+        s.Engine.Seconds = 2.73; // more than one audio page
+        var body = Speech();
+        body["response_format"] = "opus";
+        var r = await s.SpeechAsync(body);
+        Assert.Equal(HttpStatusCode.OK, r.StatusCode);
+        Assert.Equal("audio/opus", r.Content.Headers.ContentType!.MediaType);
+        var bytes = await r.Content.ReadAsByteArrayAsync();
+
+        // Ogg pages with valid CRCs: OpusHead (BOS), OpusTags, audio; the last page ends the stream and its
+        // granule position minus the pre-skip is the exact length.
+        var pages = new List<(byte Flags, long Granule, List<byte[]> Packets)>();
+        for (int at = 0; at < bytes.Length;)
+        {
+            Assert.Equal("OggS"u8.ToArray(), bytes[at..(at + 4)]);
+            int segments = bytes[at + 26];
+            int size = 27 + segments;
+            var packets = new List<byte[]>();
+            var current = new List<byte>();
+            int offset = at + 27 + segments;
+            for (int i = 0; i < segments; i++)
+            {
+                int len = bytes[at + 27 + i];
+                current.AddRange(bytes[offset..(offset + len)]);
+                offset += len;
+                size += len;
+                if (len < 255) { packets.Add(current.ToArray()); current.Clear(); }
+            }
+            var page = bytes[at..(at + size)];
+            uint stored = BitConverter.ToUInt32(page, 22);
+            page[22] = page[23] = page[24] = page[25] = 0;
+            Assert.Equal(stored, OggCrc(page));
+            pages.Add((bytes[at + 5], BitConverter.ToInt64(bytes, at + 6), packets));
+            at += size;
+        }
+        Assert.Equal(2, pages[0].Flags);
+        Assert.Equal("OpusHead"u8.ToArray(), pages[0].Packets[0][..8]);
+        Assert.Equal("OpusTags"u8.ToArray(), pages[1].Packets[0][..8]);
+        Assert.Equal(4, pages[^1].Flags);
+        Assert.All(pages.Skip(2).SelectMany(p => p.Packets), p => Assert.NotEmpty(p));
+        int preSkip = BitConverter.ToUInt16(pages[0].Packets[0], 10);
+        Assert.Equal((long)(FakeEngine.SampleRate * 2.73), pages[^1].Granule - preSkip);
+        // Granule positions are decoded samples so far (pre-skip included): 960 per 20 ms packet before the last page.
+        int packetsBefore = 0;
+        foreach (var page in pages.Skip(2).SkipLast(1))
+        {
+            packetsBefore += page.Packets.Count;
+            Assert.Equal(packetsBefore * 960L, page.Granule);
+        }
+        // 20 ms packets that cover the pre-skip and the whole utterance
+        Assert.True(pages.Skip(2).Sum(p => p.Packets.Count) * 960 >= preSkip + FakeEngine.SampleRate * 2.73);
+    }
+
+    [Theory]
+    [InlineData("mp3", "audio/mpeg")]
+    [InlineData("aac", "audio/aac")]
+    public async Task Mp3AndAacUseAnInstalledFfmpegOrExplainWhy(string format, string mediaType)
+    {
+        await using var s = await TestServer.StartAsync(prepareVoices: Voices);
+        var body = Speech();
+        body["response_format"] = format;
+        var r = await s.SpeechAsync(body);
+        if (AudioEncoders.FindFfmpeg() is null)
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, r.StatusCode);
+            Assert.Contains("ffmpeg", await r.Content.ReadAsStringAsync());
+            return;
+        }
+        Assert.Equal(HttpStatusCode.OK, r.StatusCode);
+        Assert.Equal(mediaType, r.Content.Headers.ContentType!.MediaType);
+        Assert.True((await r.Content.ReadAsByteArrayAsync()).Length > 1000);
+    }
+
+    private static uint OggCrc(byte[] data)
+    {
+        uint crc = 0;
+        foreach (var b in data)
+        {
+            crc ^= (uint)b << 24;
+            for (int i = 0; i < 8; i++) crc = (crc & 0x80000000) != 0 ? (crc << 1) ^ 0x04C11DB7 : crc << 1;
+        }
+        return crc;
+    }
+
+    [Fact]
     public async Task FlacResponseDecodesToTheSamePcmAsWav()
     {
         await using var s = await TestServer.StartAsync(prepareVoices: Voices);

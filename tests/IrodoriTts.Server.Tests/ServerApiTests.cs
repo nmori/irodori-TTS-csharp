@@ -282,7 +282,7 @@ public class ServerApiTests
         { """{"model":"irodori-tts","voice":"alice"}""", HttpStatusCode.BadRequest, "input" },
         { """{"model":"irodori-tts","input":"x","voice":"nobody"}""", HttpStatusCode.NotFound, "voice" },
         { """{"model":"irodori-tts","input":"x"}""", HttpStatusCode.BadRequest, "voice" },
-        { """{"model":"irodori-tts","input":"x","voice":"alice","response_format":"mp3"}""", HttpStatusCode.BadRequest, "response_format" },
+        { """{"model":"irodori-tts","input":"x","voice":"alice","response_format":"vorbis"}""", HttpStatusCode.BadRequest, "response_format" },
         { "{\"model\":\"irodori-tts\",\"voice\":\"alice\",\"input\":\"" + new string('あ', 4097) + "\"}", HttpStatusCode.BadRequest, "input" },
         { """{"model":"irodori-tts","input":"x","voice":"alice","stream_format":"bogus"}""", HttpStatusCode.BadRequest, "stream_format" },
         { """{"model":"irodori-tts","input":"x","voice":"alice","speed":5}""", HttpStatusCode.BadRequest, "speed" },
