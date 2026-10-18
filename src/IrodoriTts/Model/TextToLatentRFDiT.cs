@@ -51,7 +51,7 @@ public sealed class TextToLatentRFDiT : nn.Module
 
     public ModelConfig Config { get; }
 
-    public TextToLatentRFDiT(ModelConfig cfg, ModernBertConfig? pretrainedBackboneConfig = null) : base(nameof(TextToLatentRFDiT))
+    public TextToLatentRFDiT(ModelConfig cfg, IPretrainedBackboneConfig? pretrainedBackboneConfig = null) : base(nameof(TextToLatentRFDiT))
     {
         Config = cfg;
         if (cfg.UsePretrainedTextEncoder)

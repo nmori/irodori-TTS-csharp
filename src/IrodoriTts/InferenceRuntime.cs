@@ -118,7 +118,7 @@ public sealed class InferenceRuntime : IDisposable
         var codecDType = ResolveDType(options.CodecPrecision, codecDevice);
 
         using var st = new SafeTensorsFile(options.Checkpoint);
-        if (st.Metadata.ContainsKey("quantization_json") || st.Keys.Any(k => k.Contains("_qdata", StringComparison.Ordinal)))
+        if (st.Metadata.ContainsKey("irodori_quantization_json") || st.Metadata.ContainsKey("quantization_json") || st.Keys.Any(k => k.Contains("_qdata", StringComparison.Ordinal)))
         {
             throw new NotSupportedException("torchao-quantized checkpoints are not supported by the C# port; use a full-precision checkpoint.");
         }
@@ -127,10 +127,10 @@ public sealed class InferenceRuntime : IDisposable
             throw new InvalidDataException($"Missing required metadata field 'config_json' in checkpoint: {options.Checkpoint}");
         }
         var cfg = ModelConfig.FromJson(JsonNode.Parse(configJson)!.AsObject(), out var inferenceCfg);
-        ModernBertConfig? backboneCfg = null;
+        IPretrainedBackboneConfig? backboneCfg = null;
         if (st.Metadata.TryGetValue("text_encoder_config_json", out var encoderJson))
         {
-            backboneCfg = ModernBertConfig.FromJson(JsonNode.Parse(encoderJson)!.AsObject());
+            backboneCfg = PretrainedBackboneConfig.FromJson(JsonNode.Parse(encoderJson)!.AsObject());
         }
 
         TextToLatentRFDiT model;
@@ -150,7 +150,7 @@ public sealed class InferenceRuntime : IDisposable
         var tokenizerDir = options.TokenizerDirectory ?? ResolveTokenizerDirectory(options.Checkpoint)
             ?? throw new FileNotFoundException(
                 $"No tokenizer/ directory found next to the checkpoint. Download tokenizer.json for '{cfg.TextTokenizerRepo}' and set TokenizerDirectory.");
-        var unigram = UnigramTokenizer.FromDirectory(tokenizerDir);
+        var unigram = SubwordTokenizer.FromDirectory(tokenizerDir);
         var tokenizer = new TextTokenizer(unigram, cfg.TextAddBos);
         if (!cfg.UsePretrainedTextEncoder && tokenizer.VocabSize != cfg.TextVocabSize)
         {
