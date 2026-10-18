@@ -12,6 +12,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="IrodoriTts.Server.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\IrodoriTts\IrodoriTts.csproj" />
     <ProjectReference Include="..\IrodoriTts.Onnx\IrodoriTts.Onnx.csproj" />
     <Compile Include="..\Shared\TtsBackend.cs" Link="Shared\TtsBackend.cs" />

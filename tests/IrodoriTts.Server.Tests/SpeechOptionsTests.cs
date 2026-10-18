@@ -233,6 +233,27 @@ public class SpeechOptionsTests
         return crc;
     }
 
+    [Theory]
+    [InlineData("alternating")]   // full-scale ±1: residuals too large for any 4-bit Rice parameter
+    [InlineData("noise")]
+    [InlineData("silence")]
+    [InlineData("short")]
+    public void FlacEncoderIsLosslessForHardSignals(string kind)
+    {
+        var rng = new Random(5);
+        var audio = kind switch
+        {
+            "alternating" => Enumerable.Range(0, 10000).Select(i => i % 2 == 0 ? 1f : -1f).ToArray(),
+            "noise" => Enumerable.Range(0, 9000).Select(_ => (float)(rng.NextDouble() * 2 - 1)).ToArray(),
+            "silence" => new float[5000],
+            _ => new[] { 0.5f, -0.25f, 0.125f },
+        };
+        var (rate, samples, md5) = MiniFlacDecoder.Decode(IrodoriTts.Audio.FlacEncoder.Encode(audio, 48000));
+        Assert.Equal(48000, rate);
+        Assert.Equal(audio.Select(IrodoriTts.Audio.WavFile.ToPcm16), samples);
+        Assert.Equal(MD5.HashData(IrodoriTts.Audio.WavFile.ToPcm16Bytes(audio)), md5);
+    }
+
     [Fact]
     public async Task FlacResponseDecodesToTheSamePcmAsWav()
     {

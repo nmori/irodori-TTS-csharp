@@ -30,6 +30,24 @@ public class TensorKernelTests
     }
 
     [Fact]
+    public void QuantizedLinearFollowsToDtype()
+    {
+        using var inference = torch.inference_mode();
+        var q = torch.tensor(new sbyte[] { 1, -2, 3, 4, -5, 6 }).reshape(2, 3);
+        var scale = torch.tensor(new float[] { 0.5f, 0.25f }).reshape(2, 1);
+        var linear = new Model.Linear(3, 2, hasBias: false);
+        linear.SetQuantizedWeight(Model.WeightFormat.Int8, q, scale);
+        // .to() replaces the registered buffers; the layer must keep using the new ones (it used the disposed old
+        // tensors when the field names did not match the buffer names).
+        linear.to(ScalarType.Float64);
+        Assert.Equal(ScalarType.Float64, linear.DType);
+        Assert.Equal(ScalarType.Int8, linear.named_buffers().Single(b => b.name == "_weight_qdata").buffer.dtype);
+        var x = torch.ones(1, 3, dtype: ScalarType.Float64);
+        var y = linear.forward(x).data<double>().ToArray();
+        Assert.Equal(new[] { (1 - 2 + 3) * 0.5, (4 - 5 + 6) * 0.25 }, y);
+    }
+
+    [Fact]
     public void TryReadIntoFillsTheTensorLikeRead()
     {
         var path = Path.Combine(Path.GetTempPath(), $"irodori-st-{Guid.NewGuid():N}.safetensors");
@@ -65,10 +83,10 @@ public class TensorKernelTests
         }
     }
 
-    private static byte[] Bytes<T>(T[] values) where T : struct =>
+    internal static byte[] Bytes<T>(T[] values) where T : struct =>
         System.Runtime.InteropServices.MemoryMarshal.AsBytes(values.AsSpan()).ToArray();
 
-    private static void WriteSafeTensors(string path, params (string Name, string DType, long[] Shape, byte[] Data)[] tensors)
+    internal static void WriteSafeTensors(string path, params (string Name, string DType, long[] Shape, byte[] Data)[] tensors)
     {
         var header = new StringBuilder("{");
         long offset = 0;

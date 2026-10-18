@@ -11,6 +11,7 @@ public static class FlacEncoder
 {
     public const int BlockSize = 4096;
     private const int MaxPartitionOrder = 8;
+    private const int MaxRiceParameter = 14;
 
     /// <summary>Encode <paramref name="samples"/> (mono, [-1, 1]) as a complete FLAC file.</summary>
     public static byte[] Encode(ReadOnlySpan<float> samples, int sampleRate)
@@ -196,7 +197,7 @@ public static class FlacEncoder
                 long sum = 0;
                 for (int i = 0; i < count; i++) sum += Zigzag(residual[offset + i]);
                 int k = BestParameter(residual.Slice(offset, count), sum, out long partBits);
-                if (k > 14)
+                if (k is < 0 or > MaxRiceParameter)
                 {
                     ok = false;
                     break;
@@ -221,9 +222,12 @@ public static class FlacEncoder
             double mean = sum / (double)count;
             guess = mean > 1 ? (int)Math.Floor(Math.Log2(mean)) : 0;
         }
+        // Only 0..14 can be written with 4-bit parameters (15 is the escape code). Very large residuals still get
+        // the largest one, and the caller compares the cost with the other predictors and with verbatim.
+        guess = Math.Min(guess, MaxRiceParameter);
         int bestK = -1;
         bits = long.MaxValue;
-        for (int k = Math.Max(0, guess - 1); k <= Math.Min(15, guess + 1); k++)
+        for (int k = Math.Max(0, guess - 1); k <= Math.Min(MaxRiceParameter, guess + 1); k++)
         {
             long b = (long)count * (k + 1);
             foreach (var v in values) b += Zigzag(v) >> k;

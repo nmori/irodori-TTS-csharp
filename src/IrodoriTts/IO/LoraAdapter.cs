@@ -97,6 +97,12 @@ public sealed class LoraAdapter : IDisposable
                 int rank = Lookup(rankPattern, module) is double r ? (int)r : defaultRank;
                 double layerAlpha = Lookup(alphaPattern, module) ?? alpha;
                 if (a.shape[0] != rank) throw new InvalidDataException($"LoRA layer '{module}' has rank {a.shape[0]}, the config says {rank}.");
+                // Checked here, before the adapter is cached, so that activating it cannot fail half-way.
+                if (a.dim() != 2 || b.dim() != 2 || a.shape[1] != layer.InFeatures || b.shape[0] != layer.OutFeatures || b.shape[1] != a.shape[0])
+                {
+                    throw new InvalidDataException(
+                        $"LoRA layer '{module}': A [{string.Join(",", a.shape)}] / B [{string.Join(",", b.shape)}] do not fit the model's {layer.InFeatures}→{layer.OutFeatures} layer.");
+                }
                 double scaling = rsLora ? layerAlpha / Math.Sqrt(rank) : layerAlpha / rank;
                 adapter._layers.Add((layer, a.to(dtype).to(device).DetachFromDisposeScope(), b.to(dtype).to(device).DetachFromDisposeScope(), scaling));
             }
@@ -147,13 +153,22 @@ public sealed class LoraAdapter : IDisposable
     {
         var saved = new List<(Parameter, Tensor)>(_overrides.Count);
         using var _ = torch.no_grad();
-        foreach (var (layer, a, b, scaling) in _layers) layer.SetLora(a, b, scaling);
-        foreach (var (_, target, value) in _overrides)
+        try
         {
-            saved.Add((target, target.detach().clone().DetachFromDisposeScope()));
-            target.copy_(value);
+            foreach (var (layer, a, b, scaling) in _layers) layer.SetLora(a, b, scaling);
+            foreach (var (_, target, value) in _overrides)
+            {
+                saved.Add((target, target.detach().clone().DetachFromDisposeScope()));
+                target.copy_(value);
+            }
+            return saved;
         }
-        return saved;
+        catch
+        {
+            // All or nothing: a failure part-way must not leave the base model partly adapted.
+            Deactivate(saved);
+            throw;
+        }
     }
 
     internal void Deactivate(List<(Parameter Target, Tensor Saved)> saved)
