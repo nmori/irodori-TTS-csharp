@@ -6,6 +6,7 @@ namespace IrodoriTts.Tests;
 /// <summary>
 /// Chunked decoding must match the one-pass decoder. Runs only when IRODORI_TEST_CODEC (DACVAE weights.pth) is set.
 /// </summary>
+[Collection(HeavyModelCollection.Name)]
 public class DacVaeChunkTests
 {
     [Fact]

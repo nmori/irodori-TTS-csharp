@@ -4,6 +4,8 @@ using IrodoriTts.Hosting;
 using IrodoriTts.IO;
 using IrodoriTts.Server;
 
+// Before other threads allocate: glibc gives each new thread its own arena (see NativeAllocator).
+NativeAllocator.Tune();
 var opts = Args.Parse(args);
 if (opts.ContainsKey("help") || opts.ContainsKey("h"))
 {
@@ -59,12 +61,13 @@ var options = new ServerOptions
     ChunkMinChars = int.Parse(Opt("chunk-min-chars", "IRODORI_DEFAULT_CHUNK_MIN_CHARS", "80"), CultureInfo.InvariantCulture),
     FirstSentenceChunkMinChars = Opt("first-sentence-chunk-min-chars", "IRODORI_DEFAULT_FIRST_SENTENCE_CHUNK_MIN_CHARS", "") is { Length: > 0 } fs
         ? int.Parse(fs, CultureInfo.InvariantCulture) : null,
+    Defaults = SpeechOptions.DefaultsFromEnvironment(),
 };
 
 TtsBackend backend;
 try
 {
-    backend = await TtsBackend.LoadAsync(key => Args.Str(opts, key), key => opts.ContainsKey(key), Console.WriteLine);
+    backend = await TtsBackend.LoadAsync(EngineOption, key => opts.ContainsKey(key), Console.WriteLine);
     if (parentExited.IsCancellationRequested) return 0;
 }
 catch (Exception ex) when (ex is ArgumentException or FileNotFoundException or InvalidDataException or NotSupportedException or HttpRequestException)
@@ -86,6 +89,8 @@ try
     {
         Host = options.Host, Port = options.Port, ModelName = options.ModelName, ApiKey = options.ApiKey,
         DefaultVoice = options.DefaultVoice, AllowNoRef = options.AllowNoRef, VoicesDir = options.VoicesDir,
+        ChunkingEnabled = options.ChunkingEnabled, ChunkMinChars = options.ChunkMinChars,
+        FirstSentenceChunkMinChars = options.FirstSentenceChunkMinChars, Defaults = options.Defaults,
         ModelStatus = backend.OnnxAuto is null ? null : () => onnxStatus.Value?.ToJson(),
     }, engine);
     app.Lifetime.ApplicationStopping.Register(stopping.Cancel);
@@ -112,6 +117,17 @@ finally
     ((BackendEngine)engine.Current).Backend.Dispose();
 }
 return 0;
+
+// Engine options also come from Irodori-TTS-Server's environment variables (IRODORI_CHECKPOINT, IRODORI_HF_CHECKPOINT,
+// IRODORI_MODEL_DEVICE ...); a command-line option wins. "auto" (its default device) means: let the backend choose.
+string? EngineOption(string key)
+{
+    if (Args.Str(opts, key) is string value) return value;
+    if (!Args.EngineEnvironmentKeys.Contains(key)) return null;
+    var env = Environment.GetEnvironmentVariable("IRODORI_" + key.Replace('-', '_').ToUpperInvariant());
+    if (string.IsNullOrWhiteSpace(env)) return null;
+    return key.EndsWith("-device", StringComparison.Ordinal) && env.Trim().Equals("auto", StringComparison.OrdinalIgnoreCase) ? null : env.Trim();
+}
 
 static bool OnGpu(TtsBackend b) =>
     b.Description.Contains("cuda", StringComparison.OrdinalIgnoreCase) || b.Description.Contains("webgpu", StringComparison.OrdinalIgnoreCase);
@@ -212,13 +228,17 @@ internal sealed class BackendEngine(TtsBackend backend) : ISpeechEngine
 
 internal static class Args
 {
+    /// <summary>Engine options that Irodori-TTS-Server also reads from <c>IRODORI_*</c> environment variables.</summary>
+    public static readonly string[] EngineEnvironmentKeys =
+        ["checkpoint", "hf-checkpoint", "codec-repo", "model-device", "codec-device", "model-precision", "codec-precision"];
+
     public const string Usage = """
         Usage: irodori-tts-server [options]
 
         Server (environment variables of Irodori-TTS-Server are honoured):
           --host <H>                 IRODORI_HOST, default 127.0.0.1
           --port <P>                 IRODORI_PORT, default 8088
-          --voices-dir <DIR>         IRODORI_VOICES_DIR, default ./voices (*.wav, *.speaker.safetensors, voices.json)
+          --voices-dir <DIR>         IRODORI_VOICES_DIR, default ./voices (*.wav, *.speaker.safetensors, *.pt, voices.json)
           --model-name <NAME>        IRODORI_MODEL_NAME, default irodori-tts
           --api-key <KEY>            IRODORI_API_KEY (Bearer token for /v1/*)
           --default-voice <ID>       IRODORI_DEFAULT_VOICE
@@ -226,12 +246,17 @@ internal static class Args
           --chunking <B>             IRODORI_DEFAULT_CHUNKING_ENABLED, default true: split long input at punctuation
           --chunk-min-chars <N>      IRODORI_DEFAULT_CHUNK_MIN_CHARS, default 80 (non-space characters per piece)
           --first-sentence-chunk-min-chars <N>  IRODORI_DEFAULT_FIRST_SENTENCE_CHUNK_MIN_CHARS (first boundary only)
+          Sampling defaults: IRODORI_DEFAULT_RESPONSE_FORMAT, _NUM_STEPS, _T_SCHEDULE_MODE, _SWAY_COEFF, _DURATION_SCALE,
+          _MIN_SECONDS, _MAX_SECONDS, _CFG_SCALE_TEXT, _CFG_SCALE_SPEAKER, _CFG_GUIDANCE_MODE, _CFG_MIN_T, _CFG_MAX_T,
+          _CONTEXT_KV_CACHE, _MAX_REF_SECONDS, _REF_NORMALIZE_DB, _REF_ENSURE_MAX, _TRIM_TAIL, _TAIL_WINDOW_SIZE,
+          _TAIL_STD_THRESHOLD, _TAIL_MEAN_THRESHOLD, _NUM_CANDIDATES, _DECODE_MODE (used when a request omits them)
 
           --log-file <PATH>          Write the log to a file (for launches without a console)
           --parent-pid <PID>         Exit when that process exits
           --no-warmup                Skip the background warm-up synthesis at start-up on a GPU (the first request is then ~1 s slower)
 
-        Engine (same as the irodori-tts CLI):
+        Engine (same as the irodori-tts CLI; --checkpoint, --hf-checkpoint, --codec-repo, --model-device, --codec-device,
+        --model-precision and --codec-precision also read IRODORI_CHECKPOINT, IRODORI_HF_CHECKPOINT ... as in Irodori-TTS-Server):
           --backend auto|torch|onnx  --onnx-dir <DIR>  --onnx-device webgpu|cpu  --onnx-encoders-on-cpu  --onnx-decoder-fp32
           --webgpu-power high-performance|low-power
           --checkpoint <PATH> | --hf-checkpoint <REPO>   --codec-weights <PATH> | --codec-repo <REPO>

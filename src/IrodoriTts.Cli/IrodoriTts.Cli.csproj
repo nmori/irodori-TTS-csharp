@@ -20,6 +20,15 @@
     <Compile Include="..\Shared\TtsBackend.cs" Link="Shared\TtsBackend.cs" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Same license set as the server (src\IrodoriTts.Server\license\README.txt covers both). -->
+    <None Include="..\IrodoriTts.Server\license\*.txt" Exclude="..\IrodoriTts.Server\license\Concentus_BSD-3-Clause.txt" Link="license\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="..\..\samples\SpeakServer\license\*.txt" Exclude="..\..\samples\SpeakServer\license\README.txt" Link="license\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="..\..\LICENSE" Link="license\Irodori-TTS-csharp_MIT.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="..\..\tools\onnx_export\licenses\*.txt" Link="license\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="$(NuGetPackageRoot)microsoft.ml.onnxruntime\1.30.0\ThirdPartyNotices.txt" Link="license\OnnxRuntime_ThirdPartyNotices.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Condition="Exists('$(NuGetPackageRoot)microsoft.ml.onnxruntime\1.30.0\ThirdPartyNotices.txt')" />
+  </ItemGroup>
+
   <ItemGroup Condition="'$(TorchBackend)' == 'cpu'">
     <PackageReference Include="TorchSharp-cpu" Version="0.107.0" />
   </ItemGroup>

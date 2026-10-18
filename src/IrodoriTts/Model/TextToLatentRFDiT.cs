@@ -51,7 +51,7 @@ public sealed class TextToLatentRFDiT : nn.Module
 
     public ModelConfig Config { get; }
 
-    public TextToLatentRFDiT(ModelConfig cfg, ModernBertConfig? pretrainedBackboneConfig = null) : base(nameof(TextToLatentRFDiT))
+    public TextToLatentRFDiT(ModelConfig cfg, IPretrainedBackboneConfig? pretrainedBackboneConfig = null) : base(nameof(TextToLatentRFDiT))
     {
         Config = cfg;
         if (cfg.UsePretrainedTextEncoder)
@@ -107,10 +107,10 @@ public sealed class TextToLatentRFDiT : nn.Module
         {
             delta_cond_module = BuildCondModule(cfg);
         }
-        in_proj = nn.Linear(cfg.PatchedLatentDim, cfg.ModelDim);
+        in_proj = new Linear(cfg.PatchedLatentDim, cfg.ModelDim);
         blocks = new ModuleList<DiffusionBlock>(Enumerable.Range(0, cfg.NumLayers).Select(_ => new DiffusionBlock(cfg)).ToArray());
         out_norm = new RMSNorm(cfg.ModelDim, cfg.NormEps);
-        out_proj = nn.Linear(cfg.ModelDim, cfg.PatchedLatentDim);
+        out_proj = new Linear(cfg.ModelDim, cfg.PatchedLatentDim);
 
         int headDim = cfg.ModelDim / cfg.NumHeads;
         if (headDim % 2 != 0) throw new ArgumentException("model head_dim must be even for RoPE");
@@ -119,17 +119,17 @@ public sealed class TextToLatentRFDiT : nn.Module
     }
 
     private static Sequential BuildCondModule(ModelConfig cfg) => nn.Sequential(
-        nn.Linear(cfg.TimestepEmbedDim, cfg.ModelDim, hasBias: false),
+        new Linear(cfg.TimestepEmbedDim, cfg.ModelDim, hasBias: false),
         nn.SiLU(),
-        nn.Linear(cfg.ModelDim, cfg.ModelDim, hasBias: false),
+        new Linear(cfg.ModelDim, cfg.ModelDim, hasBias: false),
         nn.SiLU(),
-        nn.Linear(cfg.ModelDim, cfg.ModelDim * 3, hasBias: false));
+        new Linear(cfg.ModelDim, cfg.ModelDim * 3, hasBias: false));
 
     public bool HasDurationPredictor => duration_predictor is not null;
 
-    public Device Device => in_proj.weight.device;
+    public Device Device => in_proj.Device;
 
-    public ScalarType DType => in_proj.weight.dtype;
+    public ScalarType DType => in_proj.DType;
 
     private static (Tensor Seq, Tensor Mask) PatchSequenceWithMask(Tensor seq, Tensor mask, int patchSize)
     {

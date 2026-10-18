@@ -23,3 +23,39 @@ dotnet run --project ParityCheck -c Release -- e2e   <model.safetensors> <weight
 ```
 
 `text_ref.json` は `tests/IrodoriTts.Tests/Data/` に置くと xUnit テストのゴールデンデータとして使われます。
+
+## v4-Large の T5Gemma 2 テキストエンコーダー
+
+`transformers==5.12.1` と `safetensors` があれば、Irodori-TTS の環境は要りません。
+
+```bash
+# バックボーンの重みだけを取り出す（URL なら 13 GB 全体ではなく約 4 GB だけ取得）
+python extract_t5gemma2_backbone.py https://huggingface.co/Aratako/Irodori-TTS-v4-Large/resolve/main/model.safetensors backbone.safetensors
+# transformers.T5Gemma2TextEncoder の出力を作る（tokenizer/ は v4-Large の HF リポジトリのもの）
+python gen_t5gemma2_ref.py backbone.safetensors <tokenizer/ のフォルダ> t5gemma2_ref.safetensors
+# C# 側（xUnit）
+IRODORI_TEST_T5GEMMA2_BACKBONE=backbone.safetensors IRODORI_TEST_T5GEMMA2_REF=t5gemma2_ref.safetensors dotnet test
+```
+
+トークナイザーの参照データ（`tests/IrodoriTts.Tests/Data/bpe_ref.json`）は、HF `tokenizers` で
+`encode(text, add_special_tokens=False)` した結果です。
+
+## 量子化チェックポイント
+
+```bash
+pip install "torchao==0.16.0" safetensors
+python gen_quant_ref.py <量子化版の model.safetensors> quant_ref.safetensors
+IRODORI_TEST_QUANT_CHECKPOINTS="<model.safetensors>=quant_ref.safetensors" dotnet test
+```
+
+torchao 自身の読み込み（`unflatten_tensor_state_dict` → `dequantize()`）の結果と、C# の読み込みを比べます。
+
+## LoRA アダプター
+
+```bash
+export IRODORI_TTS_REPO=/path/to/Irodori-TTS   # pip install torch transformers peft safetensors
+python gen_lora_ref.py <ベースの model.safetensors> lora_out
+IRODORI_TEST_LORA_CHECKPOINT=<ベースの model.safetensors> IRODORI_TEST_LORA_DIR=lora_out dotnet test
+```
+
+本家の `apply_lora`（PEFT）でランダムなアダプターを 2 種類作って保存し、付けた状態・外した状態の出力を書き出します。

@@ -6,9 +6,9 @@ namespace IrodoriTts.Text;
 /// </summary>
 public sealed class TextTokenizer
 {
-    private readonly UnigramTokenizer _tokenizer;
+    private readonly ISubwordTokenizer _tokenizer;
 
-    public TextTokenizer(UnigramTokenizer tokenizer, bool addBos = true)
+    public TextTokenizer(ISubwordTokenizer tokenizer, bool addBos = true)
     {
         _tokenizer = tokenizer;
         AddBos = addBos;

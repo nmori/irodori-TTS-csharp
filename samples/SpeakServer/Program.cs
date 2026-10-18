@@ -15,6 +15,7 @@ using TorchSharp;
 Console.OutputEncoding = System.Text.Encoding.UTF8;
 // Let LibTorch's threads sleep while they wait for work (set before LibTorch is loaded).
 LibTorchRuntime.UsePassiveOpenMpWait();
+NativeAllocator.Tune();
 
 // MeanFlow model: 4 steps, fast enough on the CPU too. Downloaded once (~3 GB) to %LOCALAPPDATA%\IrodoriTts\hf.
 bool cuda = torch.cuda.is_available();

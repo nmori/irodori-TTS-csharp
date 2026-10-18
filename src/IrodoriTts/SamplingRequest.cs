@@ -31,6 +31,12 @@ public sealed class SamplingRequest
     /// <summary>Synthesize without speaker reference.</summary>
     public bool NoRef { get; set; }
 
+    /// <summary>
+    /// PEFT LoRA adapter directory (from Irodori-TTS LoRA training) applied to this request without merging;
+    /// null / "none" / "base" uses the base model. TorchSharp runtime only.
+    /// </summary>
+    public string? LoraAdapter { get; set; }
+
     public double? RefNormalizeDb { get; set; } = -16.0;
     public bool RefEnsureMax { get; set; } = true;
     public int NumCandidates { get; set; } = 1;
