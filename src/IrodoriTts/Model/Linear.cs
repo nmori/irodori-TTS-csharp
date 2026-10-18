@@ -27,7 +27,9 @@ public sealed class Linear : nn.Module<Tensor, Tensor>
 {
     private Parameter? weight;
     private readonly Parameter? bias;
-    private Tensor? _qdata, _qscale;
+    // Named as the registered buffers (and the checkpoint's "<layer>._weight_qdata" / "._weight_scale"): TorchSharp's
+    // .to(device / dtype) finds a buffer's field by that name, and would otherwise leave these on the old tensors.
+    private Tensor? _weight_qdata, _weight_scale;
     private Tensor? _fp8Table;
     private Tensor? _loraA, _loraB;
     private double _loraScaling;
@@ -57,10 +59,10 @@ public sealed class Linear : nn.Module<Tensor, Tensor>
     public Parameter? Weight => weight;
 
     /// <summary>Device of the weight (dense or quantized).</summary>
-    public Device Device => (weight ?? _qdata!).device;
+    public Device Device => (weight ?? _weight_qdata!).device;
 
     /// <summary>Floating-point dtype the layer computes in (the weight's, or the scale's for a quantized weight).</summary>
-    public ScalarType DType => weight?.dtype ?? bias?.dtype ?? _qscale!.dtype;
+    public ScalarType DType => weight?.dtype ?? bias?.dtype ?? _weight_scale!.dtype;
 
     /// <summary>
     /// Keep the weight quantized: <paramref name="qdata"/> is (out, in) int8 or float8-e4m3fn bytes (as uint8),
@@ -85,13 +87,13 @@ public sealed class Linear : nn.Module<Tensor, Tensor>
             weight.Dispose();
             weight = null;
         }
-        _qdata?.Dispose();
-        _qscale?.Dispose();
+        _weight_qdata?.Dispose();
+        _weight_scale?.Dispose();
         // Buffers move with .to(device); .to(dtype) leaves the integer data alone and converts the scale.
-        _qdata = qdata.DetachFromDisposeScope();
-        _qscale = scale.DetachFromDisposeScope();
-        register_buffer("_weight_qdata", _qdata);
-        register_buffer("_weight_scale", _qscale);
+        _weight_qdata = qdata.DetachFromDisposeScope();
+        _weight_scale = scale.DetachFromDisposeScope();
+        register_buffer("_weight_qdata", _weight_qdata);
+        register_buffer("_weight_scale", _weight_scale);
         Format = format;
     }
 
@@ -102,11 +104,11 @@ public sealed class Linear : nn.Module<Tensor, Tensor>
         // Only the result outlives the call: the temporaries of every layer would otherwise stay until the
         // caller's dispose scope ends (several GB for float8 across a forward pass).
         using var scope = torch.NewDisposeScope();
-        var q = _qdata!;
+        var q = _weight_qdata!;
         Tensor w;
         if (Format == WeightFormat.Int8)
         {
-            w = q.to(dtype).mul_(_qscale!.to(dtype));
+            w = q.to(dtype).mul_(_weight_scale!.to(dtype));
         }
         else
         {
@@ -116,7 +118,7 @@ public sealed class Linear : nn.Module<Tensor, Tensor>
                 _fp8Table = torch.tensor(Float8E4M3.Table).to(q.device).DetachFromDisposeScope();
             }
             // float8 values are exact in float32; then the scale is applied as torchao's dequantize does.
-            w = _fp8Table.index_select(0, q.reshape(-1).to(ScalarType.Int32)).reshape(q.shape).mul_(_qscale!.to(ScalarType.Float32));
+            w = _fp8Table.index_select(0, q.reshape(-1).to(ScalarType.Int32)).reshape(q.shape).mul_(_weight_scale!.to(ScalarType.Float32));
             if (dtype != ScalarType.Float32) w = w.to(dtype);
         }
         return w.MoveToOuterDisposeScope();

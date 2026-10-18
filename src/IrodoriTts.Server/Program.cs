@@ -120,14 +120,7 @@ return 0;
 
 // Engine options also come from Irodori-TTS-Server's environment variables (IRODORI_CHECKPOINT, IRODORI_HF_CHECKPOINT,
 // IRODORI_MODEL_DEVICE ...); a command-line option wins. "auto" (its default device) means: let the backend choose.
-string? EngineOption(string key)
-{
-    if (Args.Str(opts, key) is string value) return value;
-    if (!Args.EngineEnvironmentKeys.Contains(key)) return null;
-    var env = Environment.GetEnvironmentVariable("IRODORI_" + key.Replace('-', '_').ToUpperInvariant());
-    if (string.IsNullOrWhiteSpace(env)) return null;
-    return key.EndsWith("-device", StringComparison.Ordinal) && env.Trim().Equals("auto", StringComparison.OrdinalIgnoreCase) ? null : env.Trim();
-}
+string? EngineOption(string key) => Args.EngineOption(opts, key, Environment.GetEnvironmentVariable);
 
 static bool OnGpu(TtsBackend b) =>
     b.Description.Contains("cuda", StringComparison.OrdinalIgnoreCase) || b.Description.Contains("webgpu", StringComparison.OrdinalIgnoreCase);
@@ -306,4 +299,19 @@ internal static class Args
 
     public static string? Str(Dictionary<string, List<string>> o, string key) =>
         o.TryGetValue(key, out var v) && v.Count > 0 ? v[0] : null;
+
+    /// <summary>
+    /// An engine option: the command line, else Irodori-TTS-Server's <c>IRODORI_*</c> environment variable. "auto" (its
+    /// default device) means: let the backend choose. A model given on the command line (--checkpoint or
+    /// --hf-checkpoint) also turns off the environment for the other one, so it is the model that is loaded.
+    /// </summary>
+    public static string? EngineOption(Dictionary<string, List<string>> o, string key, Func<string, string?> getEnv)
+    {
+        if (Str(o, key) is string value) return value;
+        if (!EngineEnvironmentKeys.Contains(key)) return null;
+        if (key is "checkpoint" or "hf-checkpoint" && (Str(o, "checkpoint") ?? Str(o, "hf-checkpoint")) is not null) return null;
+        var env = getEnv("IRODORI_" + key.Replace('-', '_').ToUpperInvariant());
+        if (string.IsNullOrWhiteSpace(env)) return null;
+        return key.EndsWith("-device", StringComparison.Ordinal) && env.Trim().Equals("auto", StringComparison.OrdinalIgnoreCase) ? null : env.Trim();
+    }
 }
