@@ -99,7 +99,7 @@ public sealed class RMSNorm : nn.Module<Tensor, Tensor>
 
     public RMSNorm(long[] dim, double eps) : base(nameof(RMSNorm))
     {
-        weight = nn.Parameter(torch.ones(dim));
+        weight = nn.Parameter(ModelInit.Ones(dim));
         _eps = eps;
         RegisterComponents();
     }
@@ -124,7 +124,7 @@ public sealed class LayerNormNoBias : nn.Module<Tensor, Tensor>
 
     public LayerNormNoBias(long dim, double eps) : base(nameof(LayerNormNoBias))
     {
-        weight = nn.Parameter(torch.ones(dim));
+        weight = nn.Parameter(ModelInit.Ones(dim));
         _eps = eps;
         _dim = dim;
         RegisterComponents();
@@ -142,12 +142,12 @@ public sealed class LowRankAdaLN : nn.Module<Tensor, Tensor, (Tensor X, Tensor G
     {
         rank = Math.Max(1, Math.Min(rank, modelDim));
         _eps = eps;
-        shift_down = nn.Linear(modelDim, rank, hasBias: false);
-        scale_down = nn.Linear(modelDim, rank, hasBias: false);
-        gate_down = nn.Linear(modelDim, rank, hasBias: false);
-        shift_up = nn.Linear(rank, modelDim, hasBias: true);
-        scale_up = nn.Linear(rank, modelDim, hasBias: true);
-        gate_up = nn.Linear(rank, modelDim, hasBias: true);
+        shift_down = new Linear(modelDim, rank, hasBias: false);
+        scale_down = new Linear(modelDim, rank, hasBias: false);
+        gate_down = new Linear(modelDim, rank, hasBias: false);
+        shift_up = new Linear(rank, modelDim, hasBias: true);
+        scale_up = new Linear(rank, modelDim, hasBias: true);
+        gate_up = new Linear(rank, modelDim, hasBias: true);
         RegisterComponents();
     }
 
@@ -172,9 +172,9 @@ public sealed class SwiGLU : nn.Module<Tensor, Tensor>
 
     public SwiGLU(int dim, int hiddenDim) : base(nameof(SwiGLU))
     {
-        w1 = nn.Linear(dim, hiddenDim, hasBias: false);
-        w2 = nn.Linear(hiddenDim, dim, hasBias: false);
-        w3 = nn.Linear(dim, hiddenDim, hasBias: false);
+        w1 = new Linear(dim, hiddenDim, hasBias: false);
+        w2 = new Linear(hiddenDim, dim, hasBias: false);
+        w3 = new Linear(dim, hiddenDim, hasBias: false);
         RegisterComponents();
     }
 
@@ -194,11 +194,11 @@ public sealed class SelfAttention : nn.Module<Tensor, Tensor?, Tensor, Tensor>
         _heads = heads;
         _headDim = dim / heads;
         if (_headDim % 2 != 0) throw new ArgumentException("head_dim must be even for RoPE");
-        wq = nn.Linear(dim, dim, hasBias: false);
-        wk = nn.Linear(dim, dim, hasBias: false);
-        wv = nn.Linear(dim, dim, hasBias: false);
-        wo = nn.Linear(dim, dim, hasBias: false);
-        gate = nn.Linear(dim, dim, hasBias: false);
+        wq = new Linear(dim, dim, hasBias: false);
+        wk = new Linear(dim, dim, hasBias: false);
+        wv = new Linear(dim, dim, hasBias: false);
+        wo = new Linear(dim, dim, hasBias: false);
+        gate = new Linear(dim, dim, hasBias: false);
         q_norm = new RMSNorm(new long[] { heads, _headDim }, normEps);
         k_norm = new RMSNorm(new long[] { heads, _headDim }, normEps);
         RegisterComponents();
@@ -265,25 +265,25 @@ public sealed class JointAttention : nn.Module
         _heads = heads;
         _headDim = dim / heads;
         if (_headDim % 2 != 0) throw new ArgumentException("head_dim must be even for RoPE");
-        wq = nn.Linear(dim, dim, hasBias: false);
-        wk = nn.Linear(dim, dim, hasBias: false);
-        wv = nn.Linear(dim, dim, hasBias: false);
-        wk_text = nn.Linear(textCtxDim, dim, hasBias: false);
-        wv_text = nn.Linear(textCtxDim, dim, hasBias: false);
+        wq = new Linear(dim, dim, hasBias: false);
+        wk = new Linear(dim, dim, hasBias: false);
+        wv = new Linear(dim, dim, hasBias: false);
+        wk_text = new Linear(textCtxDim, dim, hasBias: false);
+        wv_text = new Linear(textCtxDim, dim, hasBias: false);
         HasSpeakerCondition = speakerCtxDim is not null;
         if (speakerCtxDim is int sd)
         {
-            wk_speaker = nn.Linear(sd, dim, hasBias: false);
-            wv_speaker = nn.Linear(sd, dim, hasBias: false);
+            wk_speaker = new Linear(sd, dim, hasBias: false);
+            wv_speaker = new Linear(sd, dim, hasBias: false);
         }
         HasCaptionCondition = captionCtxDim is not null;
         if (captionCtxDim is int cd)
         {
-            wk_caption = nn.Linear(cd, dim, hasBias: false);
-            wv_caption = nn.Linear(cd, dim, hasBias: false);
+            wk_caption = new Linear(cd, dim, hasBias: false);
+            wv_caption = new Linear(cd, dim, hasBias: false);
         }
-        gate = nn.Linear(dim, dim, hasBias: false);
-        wo = nn.Linear(dim, dim, hasBias: false);
+        gate = new Linear(dim, dim, hasBias: false);
+        wo = new Linear(dim, dim, hasBias: false);
         q_norm = new RMSNorm(new long[] { heads, _headDim }, normEps);
         k_norm = new RMSNorm(new long[] { heads, _headDim }, normEps);
         RegisterComponents();
@@ -392,7 +392,7 @@ public sealed class TextEncoder : nn.Module<Tensor, Tensor, Tensor>
 
     public TextEncoder(int vocabSize, int dim, int layers, int heads, double mlpRatio, double normEps) : base(nameof(TextEncoder))
     {
-        text_embedding = nn.Embedding(vocabSize, dim);
+        text_embedding = new Embedding(vocabSize, dim);
         blocks = new ModuleList<TextBlock>(Enumerable.Range(0, layers).Select(_ => new TextBlock(dim, heads, mlpRatio, normEps)).ToArray());
         _rope = new Rope.Cache(dim / heads);
         RegisterComponents();
@@ -429,14 +429,14 @@ public sealed class PretrainedConditionProjector : nn.Module<Tensor, Tensor, Ten
         {
             throw new ArgumentException($"pretrained projector type must be 'linear' or 'residual_mlp', got {projectorType}.");
         }
-        projector = nn.Linear(backboneDim, outputDim, hasBias: true);
+        projector = new Linear(backboneDim, outputDim, hasBias: true);
         _residual = projectorType == "residual_mlp";
         if (_residual)
         {
             int hidden = Math.Max(1, (int)Math.Round(outputDim * hiddenRatio, MidpointRounding.ToEven));
             residual_norm = new RMSNorm(backboneDim, normEps);
-            residual_up = nn.Linear(backboneDim, hidden, hasBias: true);
-            residual_down = nn.Linear(hidden, outputDim, hasBias: true);
+            residual_up = new Linear(backboneDim, hidden, hasBias: true);
+            residual_down = new Linear(hidden, outputDim, hasBias: true);
         }
         RegisterComponents();
     }
@@ -464,7 +464,7 @@ public sealed class ReferenceLatentEncoder : nn.Module<Tensor, Tensor, Tensor>
 
     public ReferenceLatentEncoder(ModelConfig cfg) : base(nameof(ReferenceLatentEncoder))
     {
-        in_proj = nn.Linear(cfg.SpeakerPatchedLatentDim, cfg.SpeakerDim, hasBias: true);
+        in_proj = new Linear(cfg.SpeakerPatchedLatentDim, cfg.SpeakerDim, hasBias: true);
         blocks = new ModuleList<TextBlock>(Enumerable.Range(0, cfg.SpeakerLayers)
             .Select(_ => new TextBlock(cfg.SpeakerDim, cfg.SpeakerHeads, cfg.SpeakerMlpRatioResolved, cfg.NormEps)).ToArray());
         _rope = new Rope.Cache(cfg.SpeakerDim / cfg.SpeakerHeads);

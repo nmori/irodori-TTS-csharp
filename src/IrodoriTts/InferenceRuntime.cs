@@ -118,10 +118,7 @@ public sealed class InferenceRuntime : IDisposable
         var codecDType = ResolveDType(options.CodecPrecision, codecDevice);
 
         using var st = new SafeTensorsFile(options.Checkpoint);
-        if (st.Metadata.ContainsKey("irodori_quantization_json") || st.Metadata.ContainsKey("quantization_json") || st.Keys.Any(k => k.Contains("_qdata", StringComparison.Ordinal)))
-        {
-            throw new NotSupportedException("torchao-quantized checkpoints are not supported by the C# port; use a full-precision checkpoint.");
-        }
+        var quantization = QuantizedCheckpoint.Read(st);
         if (!st.Metadata.TryGetValue("config_json", out var configJson))
         {
             throw new InvalidDataException($"Missing required metadata field 'config_json' in checkpoint: {options.Checkpoint}");
@@ -136,15 +133,22 @@ public sealed class InferenceRuntime : IDisposable
         TextToLatentRFDiT model;
         using (torch.no_grad())
         {
-            model = new TextToLatentRFDiT(cfg, backboneCfg);
-            var unexpected = WeightLoader.Load(model, k => st.Contains(k) ? st.Read(k) : null, st.Keys, readInto: st.TryReadInto);
+            // Built without memory or random initialization, then given storage in the target dtype and filled
+            // from the checkpoint: no second copy of the weights, and quantized layers keep their int8 / float8 data.
+            using (ModelInit.OnMeta())
+            {
+                model = new TextToLatentRFDiT(cfg, backboneCfg);
+            }
+            var quantizedKeys = quantization?.Apply(model, st) ?? new HashSet<string>();
+            ModelInit.Materialize(model, modelDType);
+            var unexpected = WeightLoader.Load(model, k => st.Contains(k) ? st.Read(k) : null,
+                st.Keys.Where(k => !quantizedKeys.Contains(k)), readInto: st.TryReadInto);
             if (unexpected.Count > 0)
             {
                 Trace.TraceWarning($"Ignoring {unexpected.Count} unexpected checkpoint tensors, e.g. {string.Join(", ", unexpected.Take(5))}");
             }
         }
         model.eval();
-        if (modelDType != ScalarType.Float32) model.to(modelDType);
         model.to(modelDevice);
 
         var tokenizerDir = options.TokenizerDirectory ?? ResolveTokenizerDirectory(options.Checkpoint)

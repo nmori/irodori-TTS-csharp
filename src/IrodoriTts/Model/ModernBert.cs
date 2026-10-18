@@ -87,7 +87,7 @@ public sealed class ModernBertEmbeddings : nn.Module<Tensor, Tensor>
     public ModernBertEmbeddings(ModernBertConfig cfg) : base(nameof(ModernBertEmbeddings))
     {
         if (cfg.NormBias) throw new NotSupportedException("ModernBERT norm_bias=True is not supported.");
-        tok_embeddings = nn.Embedding(cfg.VocabSize, cfg.HiddenSize);
+        tok_embeddings = new Embedding(cfg.VocabSize, cfg.HiddenSize);
         norm = new LayerNormNoBias(cfg.HiddenSize, cfg.NormEps);
         RegisterComponents();
     }
@@ -104,8 +104,8 @@ public sealed class ModernBertAttention : nn.Module
     {
         _heads = cfg.NumAttentionHeads;
         _headDim = cfg.HeadDim;
-        Wqkv = nn.Linear(cfg.HiddenSize, 3 * _headDim * _heads, hasBias: cfg.AttentionBias);
-        Wo = nn.Linear(cfg.HiddenSize, cfg.HiddenSize, hasBias: cfg.AttentionBias);
+        Wqkv = new Linear(cfg.HiddenSize, 3 * _headDim * _heads, hasBias: cfg.AttentionBias);
+        Wo = new Linear(cfg.HiddenSize, cfg.HiddenSize, hasBias: cfg.AttentionBias);
         RegisterComponents();
     }
 
@@ -149,8 +149,8 @@ public sealed class ModernBertMLP : nn.Module<Tensor, Tensor>
 
     public ModernBertMLP(ModernBertConfig cfg) : base(nameof(ModernBertMLP))
     {
-        Wi = nn.Linear(cfg.HiddenSize, cfg.IntermediateSize * 2, hasBias: cfg.MlpBias);
-        Wo = nn.Linear(cfg.IntermediateSize, cfg.HiddenSize, hasBias: cfg.MlpBias);
+        Wi = new Linear(cfg.HiddenSize, cfg.IntermediateSize * 2, hasBias: cfg.MlpBias);
+        Wo = new Linear(cfg.IntermediateSize, cfg.HiddenSize, hasBias: cfg.MlpBias);
         _approxTanh = cfg.HiddenActivation switch
         {
             "gelu" => false,

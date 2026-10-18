@@ -101,7 +101,7 @@ public sealed class GemmaRMSNorm : nn.Module<Tensor, Tensor>
 
     public GemmaRMSNorm(long dim, double eps) : base(nameof(GemmaRMSNorm))
     {
-        weight = nn.Parameter(torch.zeros(dim));
+        weight = nn.Parameter(ModelInit.Zeros(dim));
         _eps = eps;
         RegisterComponents();
     }
@@ -124,8 +124,8 @@ public sealed class T5Gemma2Embedding : nn.Module<Tensor, Tensor>
 
     public T5Gemma2Embedding(int vocab, int dim, int eoiIndex) : base(nameof(T5Gemma2Embedding))
     {
-        weight = nn.Parameter(torch.zeros(vocab, dim));
-        eoi_embedding = nn.Parameter(torch.zeros(dim));
+        weight = nn.Parameter(ModelInit.Zeros(vocab, dim));
+        eoi_embedding = nn.Parameter(ModelInit.Zeros(dim));
         // HF: torch.tensor(hidden_size ** 0.5) (float32), cast to the weight dtype.
         _scale = Math.Sqrt(dim);
         _eoiIndex = eoiIndex;
@@ -151,9 +151,9 @@ public sealed class T5Gemma2MLP : nn.Module<Tensor, Tensor>
 
     public T5Gemma2MLP(T5Gemma2TextConfig cfg) : base(nameof(T5Gemma2MLP))
     {
-        gate_proj = nn.Linear(cfg.HiddenSize, cfg.IntermediateSize, hasBias: false);
-        up_proj = nn.Linear(cfg.HiddenSize, cfg.IntermediateSize, hasBias: false);
-        down_proj = nn.Linear(cfg.IntermediateSize, cfg.HiddenSize, hasBias: false);
+        gate_proj = new Linear(cfg.HiddenSize, cfg.IntermediateSize, hasBias: false);
+        up_proj = new Linear(cfg.HiddenSize, cfg.IntermediateSize, hasBias: false);
+        down_proj = new Linear(cfg.IntermediateSize, cfg.HiddenSize, hasBias: false);
         _tanh = cfg.HiddenActivation switch
         {
             "gelu_pytorch_tanh" or "gelu_new" or "gelu_fast" => true,
@@ -183,10 +183,10 @@ public sealed class T5Gemma2SelfAttention : nn.Module
         _heads = cfg.NumAttentionHeads;
         _kvHeads = cfg.NumKeyValueHeads;
         _headDim = cfg.HeadDim;
-        q_proj = nn.Linear(cfg.HiddenSize, _heads * _headDim, hasBias: cfg.AttentionBias);
-        k_proj = nn.Linear(cfg.HiddenSize, _kvHeads * _headDim, hasBias: cfg.AttentionBias);
-        v_proj = nn.Linear(cfg.HiddenSize, _kvHeads * _headDim, hasBias: cfg.AttentionBias);
-        o_proj = nn.Linear(_heads * _headDim, cfg.HiddenSize, hasBias: cfg.AttentionBias);
+        q_proj = new Linear(cfg.HiddenSize, _heads * _headDim, hasBias: cfg.AttentionBias);
+        k_proj = new Linear(cfg.HiddenSize, _kvHeads * _headDim, hasBias: cfg.AttentionBias);
+        v_proj = new Linear(cfg.HiddenSize, _kvHeads * _headDim, hasBias: cfg.AttentionBias);
+        o_proj = new Linear(_heads * _headDim, cfg.HiddenSize, hasBias: cfg.AttentionBias);
         q_norm = new GemmaRMSNorm(_headDim, cfg.RmsNormEps);
         k_norm = new GemmaRMSNorm(_headDim, cfg.RmsNormEps);
         // SDPA scales by 1/sqrt(head_dim); the model uses query_pre_attn_scalar^-0.5 (the same for released configs).

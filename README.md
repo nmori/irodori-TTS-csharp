@@ -56,7 +56,8 @@ Python 版との対応:
   - CPU: `TorchSharp-cpu`
   - NVIDIA GPU (Windows): `TorchSharp-cuda-windows`（数 GB あります）
   - NVIDIA GPU (Linux): `TorchSharp-cuda-linux`
-- メモリ: fp32 で約 3 GB（モデル）+ 0.4 GB（コーデック）。GPU で bf16 を使うとモデルは約 1.5 GB
+- メモリ: fp32 で約 3 GB（モデル）+ 0.4 GB（コーデック）。GPU で bf16 を使うとモデルは約 1.5 GB。
+  量子化版（[下記](#量子化チェックポイント)）なら int8 の重みのまま動きます
 
 ライブラリ (`IrodoriTts`) は管理コードの `TorchSharp` だけを参照しているので、バックエンドは利用側のプロジェクトで選びます。
 
@@ -194,7 +195,7 @@ VRAM が 6〜8 GB の GPU では `--model-precision bf16` を推奨します。
 | 参照音声のエンコード（初回） | 5.8 秒 | 3.0 秒 |
 | デコード | 10.9 秒 | 5.0 秒 |
 | 合成の合計（モデルロード後） | 19.1 秒 | 10.0 秒 |
-| 重みの読み込み（コピー部分） | 4.7〜6.9 秒 | 0.65 秒（最大メモリ 600 MB 減） |
+| モデルの読み込み（ファイルがキャッシュ済み） | 約 15 秒 | 約 4 秒 |
 
 - **Snake 活性化**（デコーダー・エンコーダーの大半の時間）: 同じ演算を 1 つのバッファ上で行い、`1/(alpha + 1e-9)` を
   キャッシュします。48 kHz の大きな中間テンソルを作らなくなり、Snake 自体は約 3 倍速くなります
@@ -202,7 +203,10 @@ VRAM が 6〜8 GB の GPU では `--model-precision bf16` を推奨します。
   カーネル時間（34 秒）がユーザー時間の半分を超えていました。大きなブロックを再利用する設定にすると 2 秒になります
   （`IO/NativeAllocator.cs`。CLI・サーバー・サンプルは起動直後に設定します。`IRODORI_MALLOC_TUNING=0` か、
   `MALLOC_*_` を自分で設定すると変更しません）。代わりにヒープは最大時の大きさを保ちます（最大メモリ +約 250 MB）
-- **重みの読み込み**: safetensors からパラメーターのメモリへ直接読み込みます（中間のバイト配列とコピー 2 回をなくした）
+- **重みの読み込み**: モデルをメモリを使わない meta デバイス上に組み立て（乱数による初期化をしない）、
+  指定の精度で確保したパラメーターへ safetensors から直接読み込みます（中間のバイト配列とコピーをなくした）。
+  GPU + bf16 では、CPU 側で fp32 の重みを一度全部持つこともなくなりました（v4-Large で 13 GB → 6.6 GB）。
+  meta デバイスの指定はスレッドごとなので（`Model/ModelInit.cs`）、別のスレッドの合成には影響しません
 
 ## HTTP サーバー（Irodori-TTS-Server 互換）
 
@@ -468,9 +472,33 @@ irodori-tts --hf-checkpoint Aratako/Irodori-TTS-v4-Large --model-device cuda --m
   - チェックポイントの 1391 個のテンソルすべてが、C# のモデルのパラメーター名・形と一致
   - 同じ構造で小さくしたランダムなモデルで、`InferenceRuntime` の全経路（BPE トークナイザー → T5Gemma 2 → 話者パッチ 4 →
     尺予測 `token_sum_dual_adarn_zero_no_aux` → RF サンプリング → デコード、参照なし・空のキャプションも）が動くことを確認
-- end-to-end の合成は未検証です（fp32 で重みだけで 13 GB あり、検証に使った 15 GB メモリの PC には載りませんでした）。
-  GPU（bf16 で約 6.6 GB）での利用を想定しています
+- 実際の重みでの合成: 量子化版 `Aratako/Irodori-TTS-v4-Large-Quantized`（int8-weight-only、3.8 GB）を CPU（4 コア、メモリ 15 GB）で
+  合成し、Whisper で書き起こして文のとおりに読めていることを確認しました（最大メモリ 9.3 GB、8 ステップで 30 秒）。
+  fp32 版（重み 13 GB）は GPU + bf16（約 6.6 GB）か、メモリの多い PC で使ってください
 - ONNX 版は未対応です
+
+## 量子化チェックポイント
+
+本家の `quantize_checkpoint.py` で作られた torchao の量子化チェックポイント（`Aratako/Irodori-TTS-v4.1-Small-Quantized`、
+`Aratako/Irodori-TTS-v4-Large-Quantized` の各フォルダ）をそのまま読めます。torchao は不要です（ファイルの形式を読んで C# で実装）。
+
+```powershell
+irodori-tts --hf-checkpoint Aratako/Irodori-TTS-v4-Large-Quantized/int8-weight-only --text "こんにちは。" --caption "落ち着いた女性の声" --no-ref --output-wav out.wav
+```
+
+| 種類 | 対応 | 動き |
+| --- | --- | --- |
+| `int8-weight-only` | ○ | 重みは int8 のままメモリに置き、層ごとに計算の精度へ戻してから掛けます |
+| `int8-dynamic` | ○ | 重みは同じ。torchao は入力も int8 にして掛けますが、C# 版は入力を浮動小数点のまま掛けます（より精密で、結果は少し違う） |
+| `float8-weight-only` / `float8-dynamic` | ○ | 同じく float8（e4m3）のまま置きます。dynamic の入力の量子化はしません |
+| `int4-weight-only` | × | GPU 向けの詰め方（tile packed）のため未対応 |
+
+- 検証: torchao 0.16 自身が読んだ重み（`unflatten_tensor_state_dict` → `dequantize()`、bf16）と、332 層すべてでビット単位で一致
+  （`tools/parity/gen_quant_ref.py`）
+- v4.1-Small（RF、8 ステップ、同じシード）の fp32 版との違い（対数メルスペクトルの平均絶対差。シードを変えたときは 2.9）:
+  int8 は 0.17（同じ発話）、float8 は 1.4。Whisper の書き起こしは fp32 と int8 で同じ、float8 は一部が崩れました。float8 より int8 をおすすめします
+- CPU（4 コア）でのメモリと速度: fp32 は最大 5.2〜5.5 GB、int8 は 3.5〜3.9 GB。サンプリングは重みを戻す分だけ遅くなります
+  （fp32 5.2 秒 → int8 6.3 秒、float8 8.7 秒）。量子化されていない層は、チェックポイントの bf16 から指定の精度に戻します
 
 ## テスト
 
@@ -482,7 +510,9 @@ dotnet test
   トークナイザのテストは `IRODORI_TOKENIZER_DIR`（`tokenizer.json` のあるフォルダ）か HF キャッシュがあるときに実行。
   `IRODORI_TEST_CODEC`（`weights.pth`）を設定すると、区切ったデコードが一度のデコードと一致するかも確認。
   v4-Large の BPE トークナイザーのテストは `IRODORI_BPE_TOKENIZER_DIR` か HF キャッシュがあるときに、T5Gemma 2 のテストは
-  `IRODORI_TEST_T5GEMMA2_BACKBONE`（バックボーンの重み）と `IRODORI_TEST_T5GEMMA2_REF`（`tools/parity/gen_t5gemma2_ref.py` の出力）で実行
+  `IRODORI_TEST_T5GEMMA2_BACKBONE`（バックボーンの重み）と `IRODORI_TEST_T5GEMMA2_REF`（`tools/parity/gen_t5gemma2_ref.py` の出力）で実行。
+  量子化チェックポイントのテストは `IRODORI_TEST_QUANT_CHECKPOINTS`（`model.safetensors=参照.safetensors` を `;` 区切り。
+  参照は `tools/parity/gen_quant_ref.py` で作成）で実行
 - `IrodoriTts.Server.Tests`: HTTP サーバーの全 API（偽エンジンで GPU 不要）。
   `IRODORI_TEST_CHECKPOINT`（`model.safetensors`）と `IRODORI_TEST_CODEC`（`weights.pth`）を設定すると、
   実モデルで HTTP → 合成 → WAV まで通すテストも実行（MeanFlow 版なら CPU で数十秒）
@@ -491,7 +521,7 @@ dotnet test
 
 - **学習系は未移植**: `train.py`、LoRA 学習、Speaker Inversion の学習、MeanFlow 蒸留、`prepare_manifest.py`
 - **LoRA アダプタの動的ロード**（`--lora-adapter`）は未対応。マージ済みの safetensors（`convert_checkpoint_to_safetensors.py` の出力）は使えます
-- **torchao 量子化チェックポイント**（`-Quantized`）は未対応。通常の fp32 チェックポイントを使い、GPU では `bf16` を指定してください
+- **torchao 量子化チェックポイント**は int8 / float8 に対応（[下記](#量子化チェックポイント)）。int4-weight-only は未対応
 - **`.pt` 形式の学習チェックポイント**は未対応（safetensors に変換して使用）。参照潜在（`--ref-latent` の `.pt`）は読めます
 - **SilentCipher 透かし**は入りません（Python 版でもパッケージ未導入時は透かしなしで出力されます）
 - `torch.compile` / FlashAttention-3 による高速化は使っていません（SDPA を使用）

@@ -15,25 +15,29 @@ import sys
 PREFIX = "pretrained_text_backbone.backbone."
 
 
-def read_range(src: str, start: int, end: int, out_path: str | None = None) -> bytes | None:
-    """Bytes [start, end) of src, or written to out_path."""
+def append_range(src: str, start: int, end: int, out_path: str) -> None:
+    """Append bytes [start, end) of src to out_path (no temporary copy)."""
     if src.startswith("http"):
-        cmd = ["curl", "-sSL", "--retry", "8", "-r", f"{start}-{end - 1}", src]
-        if out_path is None:
-            return subprocess.run(cmd, check=True, capture_output=True).stdout
-        subprocess.run(cmd + ["-o", out_path], check=True)
-        return None
+        with open(out_path, "ab") as o:
+            subprocess.run(["curl", "-sSL", "--retry", "8", "-r", f"{start}-{end - 1}", src], check=True, stdout=o)
+        return
+    with open(src, "rb") as f, open(out_path, "ab") as o:
+        f.seek(start)
+        left = end - start
+        while left > 0:
+            chunk = f.read(min(left, 1 << 24))
+            if not chunk:
+                break
+            o.write(chunk)
+            left -= len(chunk)
+
+
+def read_range(src: str, start: int, end: int) -> bytes:
+    if src.startswith("http"):
+        return subprocess.run(["curl", "-sSL", "--retry", "8", "-r", f"{start}-{end - 1}", src], check=True, capture_output=True).stdout
     with open(src, "rb") as f:
         f.seek(start)
-        if out_path is None:
-            return f.read(end - start)
-        with open(out_path, "wb") as o:
-            left = end - start
-            while left > 0:
-                chunk = f.read(min(left, 1 << 24))
-                o.write(chunk)
-                left -= len(chunk)
-    return None
+        return f.read(end - start)
 
 
 def main() -> None:
@@ -48,22 +52,18 @@ def main() -> None:
     hi = max(v["data_offsets"][1] for v in tensors.values())
     if hi - lo != sum(v["data_offsets"][1] - v["data_offsets"][0] for v in tensors.values()):
         raise SystemExit("backbone tensors are not stored contiguously")
-    raw = out + ".raw"
-    read_range(src, base + lo, base + hi, raw)
-    if os.path.getsize(raw) != hi - lo:
-        raise SystemExit(f"short read: {os.path.getsize(raw)} of {hi - lo} bytes")
     new_header = {"__metadata__": {"text_encoder_config_json": header["__metadata__"]["text_encoder_config_json"]}}
     for k, v in sorted(tensors.items(), key=lambda kv: kv[1]["data_offsets"][0]):
         a, b = v["data_offsets"]
         new_header[k[len(PREFIX):]] = {"dtype": v["dtype"], "shape": v["shape"], "data_offsets": [a - lo, b - lo]}
     hb = json.dumps(new_header).encode()
     hb += b" " * ((8 - len(hb) % 8) % 8)
-    with open(out, "wb") as f, open(raw, "rb") as r:
+    with open(out, "wb") as f:
         f.write(struct.pack("<Q", len(hb)))
         f.write(hb)
-        while chunk := r.read(1 << 24):
-            f.write(chunk)
-    os.remove(raw)
+    append_range(src, base + lo, base + hi, out)
+    if os.path.getsize(out) != 8 + len(hb) + hi - lo:
+        raise SystemExit(f"short read: {os.path.getsize(out) - 8 - len(hb)} of {hi - lo} bytes")
     print(f"wrote {out} ({len(tensors)} tensors)")
 
 

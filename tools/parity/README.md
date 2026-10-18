@@ -39,3 +39,13 @@ IRODORI_TEST_T5GEMMA2_BACKBONE=backbone.safetensors IRODORI_TEST_T5GEMMA2_REF=t5
 
 トークナイザーの参照データ（`tests/IrodoriTts.Tests/Data/bpe_ref.json`）は、HF `tokenizers` で
 `encode(text, add_special_tokens=False)` した結果です。
+
+## 量子化チェックポイント
+
+```bash
+pip install "torchao==0.16.0" safetensors
+python gen_quant_ref.py <量子化版の model.safetensors> quant_ref.safetensors
+IRODORI_TEST_QUANT_CHECKPOINTS="<model.safetensors>=quant_ref.safetensors" dotnet test
+```
+
+torchao 自身の読み込み（`unflatten_tensor_state_dict` → `dequantize()`）の結果と、C# の読み込みを比べます。

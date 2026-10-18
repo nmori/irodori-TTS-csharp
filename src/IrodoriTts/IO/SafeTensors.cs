@@ -126,8 +126,13 @@ public sealed class SafeTensorsFile : IDisposable
         "I8" => ScalarType.Int8,
         "U8" => ScalarType.Byte,
         "BOOL" => ScalarType.Bool,
+        // TorchSharp has no float8 dtype: the raw bytes (see Model.Float8E4M3).
+        "F8_E4M3" => ScalarType.Byte,
         _ => null,
     };
+
+    /// <summary>The stored dtype name ("F32", "BF16", "I8", "F8_E4M3", ...).</summary>
+    public string GetDType(string key) => _entries[key].DType;
 
     /// <summary>Read one floating-point tensor as a float32 array without touching libtorch.</summary>
     public float[] ReadFloat32(string key, out long[] shape)
