@@ -221,10 +221,7 @@ public sealed class SpeechOptions(JsonObject body, JsonObject irodori, JsonObjec
         if (Double("tail_std_threshold") is double tailStd) req.TailStdThreshold = tailStd;
         if (Double("tail_mean_threshold") is double tailMean) req.TailMeanThreshold = tailMean;
 
-        if (NonEmptyString("lora_adapter") is string lora && lora.ToLowerInvariant() is not ("none" or "off" or "base"))
-        {
-            throw new SpeechOptionException("irodori.lora_adapter is not supported by the C# server.", "irodori.lora_adapter");
-        }
+        if (NonEmptyString("lora_adapter") is string lora) req.LoraAdapter = lora;
 
         if (req.DurationScale <= 0) throw new SpeechOptionException("duration_scale must be greater than 0.", "duration_scale");
         if (req.MaxSeconds < req.MinSeconds) throw new SpeechOptionException("max_seconds must be greater than or equal to min_seconds.", "max_seconds");

@@ -286,7 +286,8 @@ irodori-tts-server --voices-dir D:\voices --model-precision bf16    # 既定で 
   `none` のほか `no_ref` / `no-ref` / `null` / `text-only` も参照なしの声です
 - `response_format: "flac"` は純 C# のエンコーダーで作ります（可逆。WAV の約 4 割の大きさ。ffmpeg と libsndfile で
   デコードして WAV とビット単位で同じことを確認）。FLAC はデコードしながらではなく、でき上がってから返します
-- Python 版との違い: mp3 / opus / aac は未対応（ネイティブのエンコーダーが要るため）、`lora_adapter` は未対応です。
+- `irodori.lora_adapter` で LoRA アダプターのフォルダを指定できます（[下記](#lora-アダプター)。TorchSharp 版のみ）
+- Python 版との違い: mp3 / opus / aac は未対応です（ネイティブのエンコーダーが要るため）。
   状態コードは以前のこのサーバーのまま（不明なモデル・声は 404。本家は 400 / 422）です
 
 ### 配布用の発行（CPU 版を同梱し、CUDA 版は必要な PC だけが取得）
@@ -500,6 +501,25 @@ irodori-tts --hf-checkpoint Aratako/Irodori-TTS-v4-Large-Quantized/int8-weight-o
 - CPU（4 コア）でのメモリと速度: fp32 は最大 5.2〜5.5 GB、int8 は 3.5〜3.9 GB。サンプリングは重みを戻す分だけ遅くなります
   （fp32 5.2 秒 → int8 6.3 秒、float8 8.7 秒）。量子化されていない層は、チェックポイントの bf16 から指定の精度に戻します
 
+## LoRA アダプター
+
+本家の LoRA 学習（`train.py` + `configs/*_lora.yaml`）で保存されたアダプターのフォルダ（`adapter_config.json` と
+`adapter_model.safetensors` / `adapter_model.bin`）を、ベースのモデルにマージせずに使えます。
+
+```powershell
+irodori-tts --hf-checkpoint Aratako/Irodori-TTS-v4.1-Small --lora-adapter D:\lora\checkpoint_final --text "こんにちは。" --ref-wav ref.wav --output-wav out.wav
+```
+
+- リクエストごとに切り替えられます（`SamplingRequest.LoraAdapter`、サーバーでは `irodori.lora_adapter`）。`none` / `off` / `base` などで
+  ベースのモデルに戻ります。一度読んだアダプターは保持し、2 回目以降は参照を差し替えるだけです（初回の読み込みは約 0.2 秒）
+- 各層は `y = W x + b + B(A x) · lora_alpha / r` を計算します（rsLoRA は `/ sqrt(r)`、`rank_pattern` / `alpha_pattern` にも対応）。
+  `modules_to_save`（尺予測器など）とアダプターに入ったバイアスは、使う間だけ値を差し替え、外すと元の値に戻します。
+  量子化したベースのモデルにも使えます
+- 検証: 本家のモデルに本家の `apply_lora`（PEFT 0.21）でランダムなアダプターを付けた出力（テキスト状態・DiT の速度・尺予測）と、
+  DiT 用（`diffusion_attn_mlp` + 尺予測器）とテキストバックボーン用（`pretrained_backbone_attn_mlp` + バイアス）の 2 種類で一致
+  （相対誤差 1e-4 以内）。外した後はベースの出力とビット単位で同じ（`tools/parity/gen_lora_ref.py`）
+- 未対応: DoRA、Embedding / Conv への LoRA、ONNX 版
+
 ## テスト
 
 ```powershell
@@ -512,7 +532,8 @@ dotnet test
   v4-Large の BPE トークナイザーのテストは `IRODORI_BPE_TOKENIZER_DIR` か HF キャッシュがあるときに、T5Gemma 2 のテストは
   `IRODORI_TEST_T5GEMMA2_BACKBONE`（バックボーンの重み）と `IRODORI_TEST_T5GEMMA2_REF`（`tools/parity/gen_t5gemma2_ref.py` の出力）で実行。
   量子化チェックポイントのテストは `IRODORI_TEST_QUANT_CHECKPOINTS`（`model.safetensors=参照.safetensors` を `;` 区切り。
-  参照は `tools/parity/gen_quant_ref.py` で作成）で実行
+  参照は `tools/parity/gen_quant_ref.py` で作成）で、LoRA のテストは `IRODORI_TEST_LORA_CHECKPOINT`（ベースの model.safetensors）と
+  `IRODORI_TEST_LORA_DIR`（`tools/parity/gen_lora_ref.py` の出力フォルダ）で実行
 - `IrodoriTts.Server.Tests`: HTTP サーバーの全 API（偽エンジンで GPU 不要）。
   `IRODORI_TEST_CHECKPOINT`（`model.safetensors`）と `IRODORI_TEST_CODEC`（`weights.pth`）を設定すると、
   実モデルで HTTP → 合成 → WAV まで通すテストも実行（MeanFlow 版なら CPU で数十秒）
@@ -520,7 +541,7 @@ dotnet test
 ## Python 版との違い・未対応
 
 - **学習系は未移植**: `train.py`、LoRA 学習、Speaker Inversion の学習、MeanFlow 蒸留、`prepare_manifest.py`
-- **LoRA アダプタの動的ロード**（`--lora-adapter`）は未対応。マージ済みの safetensors（`convert_checkpoint_to_safetensors.py` の出力）は使えます
+- **LoRA アダプタの動的ロード**（`--lora-adapter`）は TorchSharp 版のみ（[下記](#lora-アダプター)）。ONNX 版は未対応
 - **torchao 量子化チェックポイント**は int8 / float8 に対応（[下記](#量子化チェックポイント)）。int4-weight-only は未対応
 - **`.pt` 形式の学習チェックポイント**は未対応（safetensors に変換して使用）。参照潜在（`--ref-latent` の `.pt`）は読めます
 - **SilentCipher 透かし**は入りません（Python 版でもパッケージ未導入時は透かしなしで出力されます）

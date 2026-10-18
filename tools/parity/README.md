@@ -49,3 +49,13 @@ IRODORI_TEST_QUANT_CHECKPOINTS="<model.safetensors>=quant_ref.safetensors" dotne
 ```
 
 torchao 自身の読み込み（`unflatten_tensor_state_dict` → `dequantize()`）の結果と、C# の読み込みを比べます。
+
+## LoRA アダプター
+
+```bash
+export IRODORI_TTS_REPO=/path/to/Irodori-TTS   # pip install torch transformers peft safetensors
+python gen_lora_ref.py <ベースの model.safetensors> lora_out
+IRODORI_TEST_LORA_CHECKPOINT=<ベースの model.safetensors> IRODORI_TEST_LORA_DIR=lora_out dotnet test
+```
+
+本家の `apply_lora`（PEFT）でランダムなアダプターを 2 種類作って保存し、付けた状態・外した状態の出力を書き出します。

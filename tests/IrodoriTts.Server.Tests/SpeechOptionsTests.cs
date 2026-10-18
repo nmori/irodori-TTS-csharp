@@ -35,7 +35,7 @@ public class SpeechOptionsTests
             ["truncation_factor"] = 0.8, ["rescale_k"] = 1.2, ["rescale_sigma"] = 3.0, ["context_kv_cache"] = false,
             ["speaker_kv_scale"] = 1.5, ["speaker_kv_min_t"] = 0.8, ["speaker_kv_max_layers"] = 6,
             ["trim_tail"] = false, ["tail_window_size"] = 10, ["tail_std_threshold"] = 0.02, ["tail_mean_threshold"] = 0.2,
-            ["duration_scale"] = 1.2, ["lora_adapter"] = "none",
+            ["duration_scale"] = 1.2, ["lora_adapter"] = "adapters/style1",
         };
         var r = await s.SpeechAsync(body);
         Assert.Equal(HttpStatusCode.OK, r.StatusCode);
@@ -47,6 +47,7 @@ public class SpeechOptionsTests
         Assert.Equal((1.5, 0.8, 6), (q.SpeakerKvScale, q.SpeakerKvMinT, q.SpeakerKvMaxLayers));
         Assert.Equal((false, 10, 0.02, 0.2), (q.TrimTail, q.TailWindowSize, q.TailStdThreshold, q.TailMeanThreshold));
         Assert.Equal(1.2, q.DurationScale, 9);
+        Assert.Equal("adapters/style1", q.LoraAdapter); // resolved by the runtime (relative to the working directory, as upstream)
     }
 
     [Fact]

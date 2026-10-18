@@ -333,6 +333,10 @@ public sealed class OnnxInferenceRuntime : IDisposable
 
     private SamplingResult SynthesizeCore(SamplingRequest req, Action<string>? log)
     {
+        if (!LoraAdapter.IsBase(req.LoraAdapter))
+        {
+            throw new NotSupportedException("LoRA adapters are not supported by the ONNX runtime; use the torch backend.");
+        }
         var cfg = ModelConfig;
         var messages = new List<string>();
         var timings = new List<(string, double)>();

@@ -33,6 +33,7 @@ internal static class Cli
           --ref-latent <PATH>          Pre-computed reference latent (.pt)
           --ref-latents <PATH>...      Multiple latents
           --ref-embed <PATH>           Speaker Inversion *.speaker.safetensors
+          --lora-adapter <DIR>         PEFT LoRA adapter directory (applied without merging; torch backend)
           --no-ref                     No speaker reference
 
         Backend:
@@ -107,6 +108,7 @@ internal static class Cli
                 RefWavs = List(opts, "ref-wav", "ref-wavs"),
                 RefLatents = List(opts, "ref-latent", "ref-latents"),
                 RefEmbed = Str(opts, "ref-embed"),
+                LoraAdapter = Str(opts, "lora-adapter"),
                 NoRef = opts.ContainsKey("no-ref"),
                 RefNormalizeDb = Str(opts, "ref-normalize-db") is string rn
                     ? (rn.Equals("none", StringComparison.OrdinalIgnoreCase) ? null : Dbl(rn))

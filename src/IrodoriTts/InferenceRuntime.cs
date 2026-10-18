@@ -67,7 +67,10 @@ public sealed class InferenceRuntime : IDisposable
         _defaultCaptionMaxLen = captionMaxLen;
         _defaultMaxRefSeconds = maxRefSeconds;
         _fixedTargetLatentSteps = fixedTargetLatentSteps;
+        _lora = new LoraAdapterSet(model, modelDevice, model.DType);
     }
+
+    private readonly LoraAdapterSet _lora;
 
     public static ScalarType ResolveDType(string precision, Device device)
     {
@@ -518,6 +521,10 @@ public sealed class InferenceRuntime : IDisposable
             sw.Restart();
         }
 
+        // Dynamic LoRA (unmerged; switched per request and kept loaded).
+        if (_lora.Use(req.LoraAdapter) is string loraMessage) Info(loraMessage);
+        if (!LoraAdapter.IsBase(req.LoraAdapter)) Stage("prepare_lora");
+
         var texts = Enumerable.Repeat(normalizedText, numCandidates).ToList();
         var (ids, mask) = _tokenizer.BatchEncode(texts, textMaxLen, padToLongest: true);
         var textIds = ToTensor(ids).to(_modelDevice);
@@ -698,6 +705,7 @@ public sealed class InferenceRuntime : IDisposable
 
     public void Dispose()
     {
+        _lora.Dispose();
         _model.Dispose();
         _codec.Dispose();
     }

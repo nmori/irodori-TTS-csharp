@@ -286,7 +286,7 @@ public class ServerApiTests
         { "{\"model\":\"irodori-tts\",\"voice\":\"alice\",\"input\":\"" + new string('あ', 4097) + "\"}", HttpStatusCode.BadRequest, "input" },
         { """{"model":"irodori-tts","input":"x","voice":"alice","stream_format":"bogus"}""", HttpStatusCode.BadRequest, "stream_format" },
         { """{"model":"irodori-tts","input":"x","voice":"alice","speed":5}""", HttpStatusCode.BadRequest, "speed" },
-        { """{"model":"irodori-tts","input":"x","voice":"alice","irodori":{"lora_adapter":"x"}}""", HttpStatusCode.BadRequest, "irodori.lora_adapter" },
+        { """{"model":"irodori-tts","input":"x","voice":"alice","irodori":{"lora_adapter":" "}}""", HttpStatusCode.BadRequest, "lora_adapter" },
         { """{"model":"irodori-tts","input":"x","voice":"alice","irodori":{"ref_wav":"a.wav","ref_latent":"a.pt"}}""", HttpStatusCode.BadRequest, "ref_latents" },
         { """{"model":"irodori-tts","input":"x","voice":"alice","irodori":{"ref_wav":"a.wav","ref_wavs":["b.wav"]}}""", HttpStatusCode.BadRequest, "ref_wavs" },
         { """{"model":"irodori-tts","input":"x","voice":"alice","irodori":{"ref_wavs":[]}}""", HttpStatusCode.BadRequest, "ref_wavs" },

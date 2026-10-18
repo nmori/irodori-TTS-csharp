@@ -29,6 +29,8 @@ public sealed class Linear : nn.Module<Tensor, Tensor>
     private readonly Parameter? bias;
     private Tensor? _qdata, _qscale;
     private Tensor? _fp8Table;
+    private Tensor? _loraA, _loraB;
+    private double _loraScaling;
 
     public long InFeatures { get; }
     public long OutFeatures { get; }
@@ -120,11 +122,37 @@ public sealed class Linear : nn.Module<Tensor, Tensor>
         return w.MoveToOuterDisposeScope();
     }
 
+    /// <summary>
+    /// Add a LoRA update (PEFT's unmerged form): <c>y = W x + b + B(A x) · scaling</c>, with A (r, in) and B (out, r).
+    /// The tensors stay owned by the caller; <see cref="ClearLora"/> removes the update.
+    /// </summary>
+    public void SetLora(Tensor a, Tensor b, double scaling)
+    {
+        if (a.dim() != 2 || b.dim() != 2 || a.shape[1] != InFeatures || b.shape[0] != OutFeatures || a.shape[0] != b.shape[1])
+        {
+            throw new ArgumentException($"LoRA shapes A [{string.Join(",", a.shape)}] / B [{string.Join(",", b.shape)}] do not fit a {InFeatures}→{OutFeatures} layer.");
+        }
+        (_loraA, _loraB, _loraScaling) = (a, b, scaling);
+    }
+
+    public void ClearLora() => (_loraA, _loraB) = (null, null);
+
+    public bool HasLora => _loraA is not null;
+
     public override Tensor forward(Tensor x)
     {
-        if (Format == WeightFormat.Dense) return F.linear(x, weight!, bias);
-        using var w = EffectiveWeight(x.dtype);
-        return F.linear(x, w, bias?.to(x.dtype));
+        Tensor y;
+        if (Format == WeightFormat.Dense)
+        {
+            y = F.linear(x, weight!, bias);
+        }
+        else
+        {
+            using var w = EffectiveWeight(x.dtype);
+            y = F.linear(x, w, bias?.to(x.dtype));
+        }
+        if (_loraA is null) return y;
+        return y + F.linear(F.linear(x.to(_loraA.dtype), _loraA), _loraB!) * _loraScaling;
     }
 }
 
