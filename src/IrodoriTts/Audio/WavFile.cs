@@ -196,7 +196,7 @@ public static class WavFile
     }
 
     /// <summary>libsndfile-style float → PCM16 conversion (clip, scale by 0x7FFF, round).</summary>
-    private static short ToPcm16(float v) => (short)MathF.Round(Math.Clamp(v, -1f, 1f) * 32767f);
+    internal static short ToPcm16(float v) => (short)MathF.Round(Math.Clamp(v, -1f, 1f) * 32767f);
 
     /// <summary>Write mono or multi-channel float audio as 32-bit IEEE float.</summary>
     public static void WriteFloat32(string path, float[][] samples, int sampleRate)

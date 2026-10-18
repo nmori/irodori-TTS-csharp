@@ -171,7 +171,7 @@ public class ServerApiTests
         Assert.Equal("落ち着いた声", req.Caption);
         Assert.Equal(TimeScheduleMode.Sway, req.TimeScheduleMode);
         Assert.Equal(-0.5, req.SwayCoeff);
-        Assert.Equal(3.0, req.Seconds);
+        Assert.Equal(1.5, req.Seconds); // seconds / speed, as in Irodori-TTS-Server
         Assert.Equal(20.0, req.MaxRefSeconds);
     }
 
@@ -283,11 +283,21 @@ public class ServerApiTests
         { """{"model":"irodori-tts","input":"x","voice":"nobody"}""", HttpStatusCode.NotFound, "voice" },
         { """{"model":"irodori-tts","input":"x"}""", HttpStatusCode.BadRequest, "voice" },
         { """{"model":"irodori-tts","input":"x","voice":"alice","response_format":"mp3"}""", HttpStatusCode.BadRequest, "response_format" },
+        { "{\"model\":\"irodori-tts\",\"voice\":\"alice\",\"input\":\"" + new string('あ', 4097) + "\"}", HttpStatusCode.BadRequest, "input" },
         { """{"model":"irodori-tts","input":"x","voice":"alice","stream_format":"bogus"}""", HttpStatusCode.BadRequest, "stream_format" },
         { """{"model":"irodori-tts","input":"x","voice":"alice","speed":5}""", HttpStatusCode.BadRequest, "speed" },
         { """{"model":"irodori-tts","input":"x","voice":"alice","irodori":{"lora_adapter":"x"}}""", HttpStatusCode.BadRequest, "irodori.lora_adapter" },
-        { """{"model":"irodori-tts","input":"x","voice":"alice","irodori":{"ref_latent":"a.pt"}}""", HttpStatusCode.BadRequest, "irodori" },
-        { """{"model":"irodori-tts","input":"x","voice":"alice","irodori":{"seed":"abc"}}""", HttpStatusCode.BadRequest, "irodori" },
+        { """{"model":"irodori-tts","input":"x","voice":"alice","irodori":{"ref_wav":"a.wav","ref_latent":"a.pt"}}""", HttpStatusCode.BadRequest, "ref_latents" },
+        { """{"model":"irodori-tts","input":"x","voice":"alice","irodori":{"ref_wav":"a.wav","ref_wavs":["b.wav"]}}""", HttpStatusCode.BadRequest, "ref_wavs" },
+        { """{"model":"irodori-tts","input":"x","voice":"alice","irodori":{"ref_wavs":[]}}""", HttpStatusCode.BadRequest, "ref_wavs" },
+        { """{"model":"irodori-tts","input":"x","voice":"alice","irodori":{"no_ref":true,"ref_embed":"a.speaker.safetensors"}}""", HttpStatusCode.BadRequest, "no_ref" },
+        { """{"model":"irodori-tts","input":"x","voice":"alice","irodori":{"ref_embed":"a.speaker.safetensors","ref_wav":"a.wav"}}""", HttpStatusCode.BadRequest, "ref_embed" },
+        { """{"model":"irodori-tts","input":"x","voice":"alice","irodori":{"seed":"abc"}}""", HttpStatusCode.BadRequest, "seed" },
+        { """{"model":"irodori-tts","input":"x","voice":"alice","irodori":{"duration_scale":0}}""", HttpStatusCode.BadRequest, "duration_scale" },
+        { """{"model":"irodori-tts","input":"x","voice":"alice","irodori":{"min_seconds":5,"max_seconds":2}}""", HttpStatusCode.BadRequest, "max_seconds" },
+        { """{"model":"irodori-tts","input":"x","voice":"alice","irodori":{"caption":"  "}}""", HttpStatusCode.BadRequest, "caption" },
+        { """{"model":"irodori-tts","input":"x","voice":"alice","irodori":{"decode_mode":"parallel"}}""", HttpStatusCode.BadRequest, "decode_mode" },
+        { """{"model":"irodori-tts","input":"x","voice":"alice","cfg_guidance_mode":"bogus"}""", HttpStatusCode.BadRequest, "cfg_guidance_mode" },
         { "not json", HttpStatusCode.BadRequest, "" },
     };
 

@@ -36,6 +36,11 @@ public sealed class ServerOptions
     public int ChunkMinChars { get; init; } = 80;
     /// <summary>The same for the first boundary only (IRODORI_DEFAULT_FIRST_SENTENCE_CHUNK_MIN_CHARS; null: ChunkMinChars).</summary>
     public int? FirstSentenceChunkMinChars { get; init; }
+    /// <summary>
+    /// Server defaults of sampling options (<c>IRODORI_DEFAULT_*</c>, see <see cref="SpeechOptions.DefaultsFromEnvironment"/>),
+    /// used when a request gives neither <c>irodori.X</c> nor <c>X</c>.
+    /// </summary>
+    public JsonObject? Defaults { get; init; }
 }
 
 /// <summary>
@@ -158,6 +163,9 @@ public static class ServerApp
         return SpeechChunker.Split(input, minChars, firstMin);
     }
 
+    /// <summary>Longest accepted <c>input</c> (Irodori-TTS-Server: <c>max_length=4096</c>).</summary>
+    public const int MaxInputChars = 4096;
+
     public static WebApplication Build(ServerOptions o, ISpeechEngine engine)
     {
         var voices = new VoiceStore(o.VoicesDir, o.AllowNoRef);
@@ -171,6 +179,20 @@ public static class ServerApp
             {
                 ["error"] = new JsonObject { ["message"] = message, ["type"] = type, ["param"] = param, ["code"] = null },
             }, statusCode: status);
+
+        // Anything not handled below becomes an OpenAI-style JSON error, as in Irodori-TTS-Server.
+        app.Use(async (ctx, next) =>
+        {
+            try
+            {
+                await next(ctx);
+            }
+            catch (Exception ex) when (!ctx.Response.HasStarted && !ctx.RequestAborted.IsCancellationRequested)
+            {
+                o.Log($"[server] unhandled error: {ex}");
+                await Error(500, ex.Message, "server_error").ExecuteAsync(ctx);
+            }
+        });
 
         // Bearer auth for /v1/* when an API key is configured.
         app.Use(async (ctx, next) =>
@@ -200,12 +222,26 @@ public static class ServerApp
             ["default_voice"] = o.DefaultVoice,
             ["allow_no_ref_voice"] = o.AllowNoRef,
             ["onnx_model"] = o.ModelStatus?.Invoke(),
+            // Irodori-TTS-Server's nested sections (its "model" object is not used: "model" stays the name here).
+            ["voices"] = new JsonObject
+            {
+                ["dir"] = Path.GetFullPath(o.VoicesDir),
+                ["dir_exists"] = Directory.Exists(o.VoicesDir),
+                ["files"] = Directory.Exists(o.VoicesDir) ? Directory.EnumerateFiles(o.VoicesDir).Count(VoiceStore.IsSupportedFile) : 0,
+            },
+            ["defaults"] = new JsonObject
+            {
+                ["response_format"] = o.Defaults?["response_format"]?.DeepClone() ?? "wav",
+                ["chunking_enabled"] = o.ChunkingEnabled,
+                ["chunk_min_chars"] = o.ChunkMinChars,
+                ["first_sentence_chunk_min_chars"] = o.FirstSentenceChunkMinChars,
+            },
         }));
 
         app.MapGet("/v1/models", () => Results.Json(new JsonObject
         {
             ["object"] = "list",
-            ["data"] = new JsonArray(new JsonObject { ["id"] = o.ModelName, ["object"] = "model", ["owned_by"] = "irodori" }),
+            ["data"] = new JsonArray(new JsonObject { ["id"] = o.ModelName, ["object"] = "model", ["created"] = 0, ["owned_by"] = "irodori-tts" }),
         }));
 
         JsonObject VoiceJson(VoiceSpec v) => new()
@@ -213,8 +249,15 @@ public static class ServerApp
             ["id"] = v.Id,
             ["object"] = "voice",
             ["type"] = v.Type,
-            ["files"] = new JsonArray(v.RefWavs.Concat(v.RefEmbed is null ? Array.Empty<string>() : new[] { v.RefEmbed })
+            ["files"] = new JsonArray(v.RefWavs.Concat(v.RefLatents).Concat(v.RefEmbed is null ? Array.Empty<string>() : new[] { v.RefEmbed })
                 .Select(f => (JsonNode)Path.GetFileName(f)).ToArray()),
+            // Irodori-TTS-Server's fields (full paths).
+            ["ref_wav"] = v.RefWavs.Count == 1 ? v.RefWavs[0] : null,
+            ["ref_wavs"] = v.RefWavs.Count > 1 ? new JsonArray(v.RefWavs.Select(f => (JsonNode)f).ToArray()) : null,
+            ["ref_latent"] = v.RefLatents.Count == 1 ? v.RefLatents[0] : null,
+            ["ref_latents"] = v.RefLatents.Count > 1 ? new JsonArray(v.RefLatents.Select(f => (JsonNode)f).ToArray()) : null,
+            ["ref_embed"] = v.RefEmbed,
+            ["no_ref"] = v.NoRef,
         };
 
         app.MapGet("/v1/audio/voices", () =>
@@ -287,15 +330,20 @@ public static class ServerApp
             }
 
             string? model = body["model"]?.GetValue<string>();
+            // Status codes are this server's own (404 for an unknown model / voice; Irodori-TTS-Server answers 400
+            // and 422), kept for the clients written against it.
             if (model is null) return Error(400, "'model' is required.", param: "model");
             if (!model.Equals(o.ModelName, StringComparison.Ordinal)) return Error(404, $"Model '{model}' not found. Use '{o.ModelName}'.", param: "model");
             string? input = body["input"]?.GetValue<string>();
             if (string.IsNullOrWhiteSpace(input)) return Error(400, "'input' is required.", param: "input");
+            if (input.Length > MaxInputChars) return Error(400, $"'input' must be at most {MaxInputChars} characters.", param: "input");
 
-            string format = body["response_format"]?.GetValue<string>()?.ToLowerInvariant() ?? "wav";
-            if (format is not ("wav" or "pcm"))
+            var irodori = body["irodori"] as JsonObject ?? new JsonObject();
+            var opts = new SpeechOptions(body, irodori, o.Defaults);
+            string format = (body["response_format"] ?? o.Defaults?["response_format"])?.GetValue<string>()?.Trim().ToLowerInvariant() ?? "wav";
+            if (!AudioFormats.IsSupported(format))
             {
-                return Error(400, $"response_format '{format}' is not supported by the C# server (use wav or pcm).", param: "response_format");
+                return Error(400, $"response_format '{format}' is not supported by the C# server (use {AudioFormats.SupportedList}).", param: "response_format");
             }
             string streamFormat = body["stream_format"]?.GetValue<string>()?.ToLowerInvariant() ?? "audio";
             if (streamFormat is not ("audio" or "sse"))
@@ -308,65 +356,36 @@ public static class ServerApp
                 JsonValue v => v.GetValue<string>(),
                 JsonObject o => o["id"]?.GetValue<string>(),
                 _ => null,
-            } ?? o.DefaultVoice;
-            var irodori = body["irodori"] as JsonObject ?? new JsonObject();
-
-            var req = new SamplingRequest { Text = input };
-            bool hasServerRefs = irodori["ref_wav"] is not null || irodori["ref_wavs"] is not null;
-            if (irodori["ref_latent"] is not null || irodori["ref_latents"] is not null)
-            {
-                return Error(400, "irodori.ref_latent(s) are not supported by the C# server; use ref_wav(s).", param: "irodori");
-            }
-            if (hasServerRefs)
-            {
-                if (irodori["ref_wav"] is not null && irodori["ref_wavs"] is not null)
-                {
-                    return Error(400, "Use either irodori.ref_wav or irodori.ref_wavs, not both.", param: "irodori");
-                }
-                var list = irodori["ref_wavs"] is JsonArray arr ? arr.Select(x => x!.GetValue<string>()).ToList()
-                    : new List<string> { irodori["ref_wav"]!.GetValue<string>() };
-                req.RefWavs = list.Select(p => Path.IsPathRooted(p) ? p : Path.Combine(o.VoicesDir, p)).ToList();
-            }
-            else if (voiceId is null)
-            {
-                return Error(400, "'voice' is required (no default voice is configured).", param: "voice");
-            }
-            else
-            {
-                var voice = voices.Find(voiceId);
-                if (voice is null) return Error(404, $"Voice '{voiceId}' not found.", param: "voice");
-                if (voice.NoRef) req.NoRef = true;
-                else if (voice.RefEmbed is not null) req.RefEmbed = voice.RefEmbed;
-                else req.RefWavs = voice.RefWavs.ToList();
-            }
+            };
+            if (string.IsNullOrWhiteSpace(voiceId)) voiceId = o.DefaultVoice;
 
             double speed = body["speed"]?.GetValue<double>() ?? 1.0;
             if (speed is < 0.25 or > 4.0) return Error(400, "'speed' must be between 0.25 and 4.0.", param: "speed");
-            req.DurationScale = 1.0 / speed;
 
+            var req = new SamplingRequest { Text = input };
             try
             {
-                if (irodori["lora_adapter"]?.GetValue<string>() is string lora && lora.ToLowerInvariant() is not ("none" or "base" or ""))
+                if (!opts.ApplyRequestReferences(req, o.VoicesDir))
                 {
-                    return Error(400, "irodori.lora_adapter is not supported by the C# server.", param: "irodori.lora_adapter");
+                    if (voiceId is null) return Error(400, "'voice' is required (no default voice is configured).", param: "voice");
+                    var voice = voices.Find(voiceId);
+                    if (voice is null) return Error(404, $"Voice '{voiceId}' not found.", param: "voice");
+                    if (voice.NoRef) req.NoRef = true;
+                    else if (voice.RefEmbed is not null) req.RefEmbed = voice.RefEmbed;
+                    else if (voice.RefLatents.Count > 0) req.RefLatents = voice.RefLatents.ToList();
+                    else req.RefWavs = voice.RefWavs.ToList();
                 }
-                if (irodori["num_steps"] is JsonNode ns) req.NumSteps = ns.GetValue<int>();
-                if (irodori["seed"] is JsonNode seed) req.Seed = seed.GetValue<long>();
-                if (irodori["cfg_scale_text"] is JsonNode ct) req.CfgScaleText = ct.GetValue<double>();
-                if (irodori["cfg_scale_speaker"] is JsonNode cs) req.CfgScaleSpeaker = cs.GetValue<double>();
-                if (irodori["cfg_scale_caption"] is JsonNode cc) req.CfgScaleCaption = cc.GetValue<double>();
-                if (irodori["cfg_scale"] is JsonNode ca) req.CfgScale = ca.GetValue<double>();
-                if (irodori["cfg_guidance_mode"]?.GetValue<string>() is string gm) req.CfgGuidanceMode = Enum.Parse<CfgGuidanceMode>(gm, ignoreCase: true);
-                if (irodori["t_schedule_mode"]?.GetValue<string>() is string tm) req.TimeScheduleMode = Enum.Parse<TimeScheduleMode>(tm, ignoreCase: true);
-                if (irodori["sway_coeff"] is JsonNode sc) req.SwayCoeff = sc.GetValue<double>();
-                if (irodori["caption"]?.GetValue<string>() is string cap) req.Caption = cap;
-                if (irodori["max_caption_len"] is JsonNode mcl) req.MaxCaptionLen = mcl.GetValue<int>();
-                if (irodori["max_ref_seconds"] is JsonNode mrs) req.MaxRefSeconds = mrs.GetValue<double>();
-                if (irodori["seconds"] is JsonNode sec) req.Seconds = sec.GetValue<double>();
-                if (irodori["duration_scale"] is JsonNode ds) req.DurationScale = ds.GetValue<double>() / speed;
-                if (irodori["max_seconds"] is JsonNode mx) req.MaxSeconds = mx.GetValue<double>();
+                else
+                {
+                    voiceId = null;
+                }
+                opts.ApplySampling(req, speed);
             }
-            catch (Exception ex) when (ex is FormatException or InvalidOperationException or ArgumentException)
+            catch (SpeechOptionException ex)
+            {
+                return Error(400, ex.Message, param: ex.Param);
+            }
+            catch (Exception ex) when (ex is FormatException or InvalidOperationException)
             {
                 return Error(400, $"Invalid irodori option: {ex.Message}", param: "irodori");
             }
@@ -402,9 +421,10 @@ public static class ServerApp
             var chunks = Channel.CreateUnbounded<AudioChunk>(new UnboundedChannelOptions { SingleReader = true });
             var work = Task.Run(() =>
             {
+                bool progressive = AudioFormats.IsProgressive(format);
                 if (pieces.Count == 1)
                 {
-                    req.OnAudioChunk = c => chunks.Writer.TryWrite(c);
+                    if (progressive) req.OnAudioChunk = c => chunks.Writer.TryWrite(c);
                     return engine.Synthesize(req);
                 }
                 var results = new List<SamplingResult>();
@@ -414,7 +434,7 @@ public static class ServerApp
                     var r = PieceRequest(piece);
                     long at = offset;
                     // The length of the whole response is unknown until the last piece (TotalSamples = -1).
-                    r.OnAudioChunk = c => chunks.Writer.TryWrite(c with { Offset = at + c.Offset, TotalSamples = -1 });
+                    if (progressive) r.OnAudioChunk = c => chunks.Writer.TryWrite(c with { Offset = at + c.Offset, TotalSamples = -1 });
                     var result = engine.Synthesize(r);
                     results.Add(result);
                     offset += result.Audio.Length;
@@ -447,7 +467,7 @@ public static class ServerApp
                 }
                 LogSpeech(result.Audio.Length, result.SampleRate, result.UsedSeed);
                 SetHeaders(result.UsedSeed, result.SampleRate);
-                return Results.Bytes(Encode(result.Audio, result.SampleRate), format == "pcm" ? "audio/pcm" : "audio/wav");
+                return Results.Bytes(AudioFormats.Encode(result.Audio, result.SampleRate, format), AudioFormats.ContentType(format));
             }
 
             chunks.Reader.TryPeek(out var head);
@@ -483,14 +503,6 @@ public static class ServerApp
             }
             return Results.Empty;
 
-            byte[] Encode(float[] audio, int sampleRate)
-            {
-                if (format == "pcm") return WavFile.ToPcm16Bytes(audio);
-                using var ms = new MemoryStream();
-                WavFile.WritePcm16(ms, new[] { audio }, sampleRate);
-                return ms.ToArray();
-            }
-
             // stream_format "sse" (Irodori-TTS-Server): one audio_chunk event per piece carrying a complete audio file,
             // then done; a failure becomes an error event.
             async Task<IResult> SpeechEvents()
@@ -520,8 +532,8 @@ public static class ServerApp
                             ["index"] = i,
                             ["text"] = piece,
                             ["format"] = format,
-                            ["media_type"] = format == "pcm" ? "audio/pcm" : "audio/wav",
-                            ["audio_base64"] = Convert.ToBase64String(Encode(result.Audio, result.SampleRate)),
+                            ["media_type"] = AudioFormats.ContentType(format),
+                            ["audio_base64"] = Convert.ToBase64String(AudioFormats.Encode(result.Audio, result.SampleRate, format)),
                             ["seed"] = result.UsedSeed,
                             ["total_to_decode"] = result.TotalToDecode,
                         });
@@ -561,6 +573,7 @@ public static class ServerApp
             {
                 response.Headers["X-Irodori-Seed"] = seed.ToString(CultureInfo.InvariantCulture);
                 response.Headers["X-Irodori-Sample-Rate"] = sampleRate.ToString(CultureInfo.InvariantCulture);
+                response.Headers.ContentDisposition = $"attachment; filename=\"speech.{format}\"";
             }
 
             void LogSpeech(long samples, int sampleRate, long seed) =>
