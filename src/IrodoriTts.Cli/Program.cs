@@ -5,6 +5,8 @@ using IrodoriTts.IO;
 using IrodoriTts.Sampling;
 
 // C# counterpart of Irodori-TTS infer.py.
+// Before other threads allocate: glibc gives each new thread its own arena (see NativeAllocator).
+NativeAllocator.Tune();
 return await Cli.RunAsync(args);
 
 internal static class Cli

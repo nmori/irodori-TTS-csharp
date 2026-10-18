@@ -108,6 +108,7 @@ public static class LibTorchRuntime
         IProgress<(string File, long Downloaded, long? Total)>? progress = null, CancellationToken cancellationToken = default)
     {
         UsePassiveOpenMpWait();
+        NativeAllocator.Tune();
         if (!IsSplitLayout)
         {
             // LibTorch sits next to the exe; only an explicit, ready CUDA build may replace it.

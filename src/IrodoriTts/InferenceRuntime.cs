@@ -111,6 +111,7 @@ public sealed class InferenceRuntime : IDisposable
 
     public static InferenceRuntime Load(RuntimeOptions options)
     {
+        NativeAllocator.Tune();
         var modelDevice = torch.device(options.ModelDevice);
         var codecDevice = torch.device(options.CodecDevice);
         var modelDType = ResolveDType(options.ModelPrecision, modelDevice);
@@ -136,7 +137,7 @@ public sealed class InferenceRuntime : IDisposable
         using (torch.no_grad())
         {
             model = new TextToLatentRFDiT(cfg, backboneCfg);
-            var unexpected = WeightLoader.Load(model, k => st.Contains(k) ? st.Read(k) : null, st.Keys);
+            var unexpected = WeightLoader.Load(model, k => st.Contains(k) ? st.Read(k) : null, st.Keys, readInto: st.TryReadInto);
             if (unexpected.Count > 0)
             {
                 Trace.TraceWarning($"Ignoring {unexpected.Count} unexpected checkpoint tensors, e.g. {string.Join(", ", unexpected.Take(5))}");

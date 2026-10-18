@@ -4,6 +4,8 @@ using IrodoriTts.Hosting;
 using IrodoriTts.IO;
 using IrodoriTts.Server;
 
+// Before other threads allocate: glibc gives each new thread its own arena (see NativeAllocator).
+NativeAllocator.Tune();
 var opts = Args.Parse(args);
 if (opts.ContainsKey("help") || opts.ContainsKey("h"))
 {
