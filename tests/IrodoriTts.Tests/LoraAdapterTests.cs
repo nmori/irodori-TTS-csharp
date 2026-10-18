@@ -11,6 +11,7 @@ namespace IrodoriTts.Tests;
 /// <c>IRODORI_TEST_LORA_CHECKPOINT</c> (the base model.safetensors) and <c>IRODORI_TEST_LORA_DIR</c> (the script's
 /// output folder) are set.
 /// </summary>
+[Collection(HeavyModelCollection.Name)]
 public class LoraAdapterTests
 {
     [Fact]

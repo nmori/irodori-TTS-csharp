@@ -11,6 +11,7 @@ namespace IrodoriTts.Tests;
 /// <c>IRODORI_TEST_T5GEMMA2_BACKBONE</c> (the backbone tensors as a safetensors file with the encoder config as
 /// <c>text_encoder_config_json</c>) and <c>IRODORI_TEST_T5GEMMA2_REF</c> (from <c>tools/parity/gen_t5gemma2_ref.py</c>) are set.
 /// </summary>
+[Collection(HeavyModelCollection.Name)]
 public class T5Gemma2Tests
 {
     [Fact]

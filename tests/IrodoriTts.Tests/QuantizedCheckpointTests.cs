@@ -11,6 +11,7 @@ namespace IrodoriTts.Tests;
 /// Runs when <c>IRODORI_TEST_QUANT_CHECKPOINTS</c> lists <c>model.safetensors=reference.safetensors</c> pairs
 /// separated by <c>;</c>.
 /// </summary>
+[Collection(HeavyModelCollection.Name)]
 public class QuantizedCheckpointTests
 {
     public static TheoryData<string, string> Pairs()
