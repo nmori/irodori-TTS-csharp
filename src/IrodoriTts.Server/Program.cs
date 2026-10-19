@@ -73,7 +73,7 @@ if (!PortIsFree(options.Host, options.Port))
 TtsBackend backend;
 try
 {
-    backend = await TtsBackend.LoadAsync(key => Args.Str(opts, key), key => opts.ContainsKey(key), Console.WriteLine);
+    backend = await TtsBackend.LoadAsync(key => Args.EngineOption(opts, key, Environment.GetEnvironmentVariable), key => opts.ContainsKey(key), Console.WriteLine);
     if (parentExited.IsCancellationRequested) return 0;
 }
 catch (Exception ex) when (ex is ArgumentException or FileNotFoundException or InvalidDataException or NotSupportedException or HttpRequestException)
@@ -325,4 +325,27 @@ internal static class Args
 
     public static string? Str(Dictionary<string, List<string>> o, string key) =>
         o.TryGetValue(key, out var v) && v.Count > 0 ? v[0] : null;
+
+    private static readonly Dictionary<string, string> EngineEnv = new(StringComparer.Ordinal)
+    {
+        ["checkpoint"] = "IRODORI_CHECKPOINT",
+        ["hf-checkpoint"] = "IRODORI_HF_CHECKPOINT",
+        ["model-device"] = "IRODORI_MODEL_DEVICE",
+        ["model-precision"] = "IRODORI_MODEL_PRECISION",
+    };
+
+    /// <summary>Engine option: command line first, else the Irodori-TTS-Server environment variable. "auto" means unset.</summary>
+    public static string? EngineOption(Dictionary<string, List<string>> o, string key, Func<string, string?> env)
+    {
+        string? cli = Str(o, key);
+        if (!string.IsNullOrEmpty(cli)) return cli == "auto" ? null : cli;
+
+        // A checkpoint given on the command line suppresses the other source from the environment.
+        if (key == "checkpoint" && !string.IsNullOrEmpty(Str(o, "hf-checkpoint"))) return null;
+        if (key == "hf-checkpoint" && !string.IsNullOrEmpty(Str(o, "checkpoint"))) return null;
+
+        if (!EngineEnv.TryGetValue(key, out var name)) return null;
+        string? ev = env(name);
+        return string.IsNullOrEmpty(ev) || ev == "auto" ? null : ev;
+    }
 }
