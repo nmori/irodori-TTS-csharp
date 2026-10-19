@@ -10,6 +10,8 @@
 
   <ItemGroup>
     <PackageReference Include="xunit.v3" Version="4.0.1" />
+    <!-- Native CPU LibTorch for the tensor tests (layers, weight loading, codec). -->
+    <PackageReference Include="TorchSharp-cpu" Version="0.107.0" />
     <Using Include="Xunit" />
   </ItemGroup>
 

@@ -5,7 +5,8 @@
 
 - HuggingFace で公開されている `model.safetensors` と DACVAE の `weights.pth` をそのまま読み込めます（変換作業は不要）
 - 同じシードを使えば Python 版とほぼ同じ音声が生成されます（CPU で検証済み。下の「検証結果」を参照）
-- 対応モデル: `Aratako/Irodori-TTS-v4.1-Small`（既定）、`Aratako/Irodori-TTS-v4.1-Small-MF`（MeanFlow）、v2/v3 系の safetensors チェックポイント
+- 対応モデル: `Aratako/Irodori-TTS-v4.1-Small`（既定）、`Aratako/Irodori-TTS-v4.1-Small-MF`（MeanFlow）、
+  `Aratako/Irodori-TTS-v4-Large`（T5Gemma 2 のテキストエンコーダー。[下記](#v4-large)）、v2/v3 系の safetensors チェックポイント
 - 実行方式は 2 つ: **TorchSharp**（CPU / NVIDIA CUDA）と **ONNX Runtime**（WebGPU で AMD・Intel・NVIDIA の GPU、または CPU）。
   CLI は PC に合わせて自動で選びます（[どの PC でも動かす](#どの-pc-でも動かすonnx-runtime--webgpu)）
 
@@ -41,7 +42,8 @@ Python 版との対応:
 | `irodori_tts/rf.py`, `meanflow.py`（推論部分） | `Sampling/Samplers.cs` |
 | `irodori_tts/codec.py` + `dacvae` | `Codec/DacVaeCodec.cs`, `Codec/DacVae.cs` |
 | `irodori_tts/inference_runtime.py` | `InferenceRuntime.cs`, `SamplingRequest.cs` |
-| `irodori_tts/tokenizer.py` + HF tokenizers | `Text/UnigramTokenizer.cs`, `Text/TextTokenizer.cs` |
+| transformers `T5Gemma2TextEncoder`（v4-Large） | `Model/T5Gemma2.cs` |
+| `irodori_tts/tokenizer.py` + HF tokenizers | `Text/UnigramTokenizer.cs`, `Text/BpeTokenizer.cs`（Gemma）, `Text/TextTokenizer.cs` |
 | `irodori_tts/text_normalization.py` | `Text/TextNormalizer.cs` |
 | `irodori_tts/duration.py` | `Text/DurationFeatures.cs` |
 | torchaudio `resample` / audiotools `normalize` | `Audio/AudioDsp.cs` |
@@ -54,7 +56,8 @@ Python 版との対応:
   - CPU: `TorchSharp-cpu`
   - NVIDIA GPU (Windows): `TorchSharp-cuda-windows`（数 GB あります）
   - NVIDIA GPU (Linux): `TorchSharp-cuda-linux`
-- メモリ: fp32 で約 3 GB（モデル）+ 0.4 GB（コーデック）。GPU で bf16 を使うとモデルは約 1.5 GB
+- メモリ: fp32 で約 3 GB（モデル）+ 0.4 GB（コーデック）。GPU で bf16 を使うとモデルは約 1.5 GB。
+  量子化版（[下記](#量子化チェックポイント)）なら int8 の重みのまま動きます
 
 ライブラリ (`IrodoriTts`) は管理コードの `TorchSharp` だけを参照しているので、バックエンドは利用側のプロジェクトで選びます。
 
@@ -182,6 +185,29 @@ VRAM が 6〜8 GB の GPU では `--model-precision bf16` を推奨します。
 - LibTorch の CPU スレッドは、仕事を待つ間に空回りせず休むように設定しています（`OMP_WAIT_POLICY=PASSIVE`、
   自分で設定した値があればそちらを使います）。GPU で合成中の CPU 使用率が 64% から 5% に下がり、CPU だけでも少し速くなります
 
+### CPU での高速化（結果は変わりません）
+
+4 コアの CPU（MeanFlow 版、参照音声 + キャプション、9.2 秒の音声、CLI の 1 回目）での実測です。
+どれも出力の WAV がビット単位で同じことを確かめています。
+
+| | 以前 | 現在 |
+| --- | --- | --- |
+| 参照音声のエンコード（初回） | 5.8 秒 | 3.0 秒 |
+| デコード | 10.9 秒 | 5.0 秒 |
+| 合成の合計（モデルロード後） | 19.1 秒 | 10.0 秒 |
+| モデルの読み込み（ファイルがキャッシュ済み） | 約 15 秒 | 約 4 秒 |
+
+- **Snake 活性化**（デコーダー・エンコーダーの大半の時間）: 同じ演算を 1 つのバッファ上で行い、`1/(alpha + 1e-9)` を
+  キャッシュします。48 kHz の大きな中間テンソルを作らなくなり、Snake 自体は約 3 倍速くなります
+- **glibc のメモリ確保**（Linux）: 数十〜数百 MB のブロックを毎回 `mmap` / `munmap` し直していたため、ページのゼロ埋めで
+  カーネル時間（34 秒）がユーザー時間の半分を超えていました。大きなブロックを再利用する設定にすると 2 秒になります
+  （`IO/NativeAllocator.cs`。CLI・サーバー・サンプルは起動直後に設定します。`IRODORI_MALLOC_TUNING=0` か、
+  `MALLOC_*_` を自分で設定すると変更しません）。代わりにヒープは最大時の大きさを保ちます（最大メモリ +約 250 MB）
+- **重みの読み込み**: モデルをメモリを使わない meta デバイス上に組み立て（乱数による初期化をしない）、
+  指定の精度で確保したパラメーターへ safetensors から直接読み込みます（中間のバイト配列とコピーをなくした）。
+  GPU + bf16 では、CPU 側で fp32 の重みを一度全部持つこともなくなりました（v4-Large で 13 GB → 6.6 GB）。
+  meta デバイスの指定はスレッドごとなので（`Model/ModelInit.cs`）、別のスレッドの合成には影響しません
+
 ## HTTP サーバー（Irodori-TTS-Server 互換）
 
 `irodori-tts-server` は、Python 版の [Irodori-TTS-Server](https://github.com/Aratako/Irodori-TTS-Server) と同じ
@@ -196,7 +222,7 @@ irodori-tts-server --voices-dir D:\voices --model-precision bf16    # 既定で 
 | --- | --- |
 | `GET /health` | 状態（読み込み済みのモデル、実行方式など） |
 | `GET /v1/models` | モデル ID（既定 `irodori-tts`） |
-| `POST /v1/audio/speech` | 合成。`model`, `input`, `voice`, `response_format`（`wav` / `pcm`）, `speed`, `irodori`（`seed`, `num_steps`, `caption`, `cfg_scale_*`, `t_schedule_mode`, `ref_wav(s)` など） |
+| `POST /v1/audio/speech` | 合成。`model`, `input`, `voice`, `response_format`（`wav` / `pcm` / `flac` / `opus` / `mp3` / `aac`）, `speed`, `irodori`（本家と同じ全オプション。下記） |
 | `GET /v1/audio/voices` | 声の一覧（`data[].id`） |
 | `POST` / `PUT` / `GET` / `DELETE /v1/audio/voices[/{id}]` | 声ファイルのアップロード・取得・削除 |
 
@@ -243,8 +269,30 @@ irodori-tts-server --voices-dir D:\voices --model-precision bf16    # 既定で 
   - `stream_format: "sse"` にも対応しました。片ごとに `audio_chunk`（`index`, `text`, `format`, `media_type`,
     `audio_base64` = その片の完全な音声ファイル, `seed`, `total_to_decode`）を送り、最後に `done`（`chunks`）、
     失敗したときは `error` を送ります
-- Python 版との違い: `response_format` は `wav` / `pcm` のみ（mp3 / flac / opus / aac は未対応）、
-  `lora_adapter`、`.pt` の参照潜在は未対応です
+- 合成のオプションは本家と同じく `irodori.X` → 最上位の `X` → サーバーの既定（環境変数 `IRODORI_DEFAULT_X`）の順で読みます。
+  `seed`, `num_steps`, `caption`, `seconds`, `duration_scale`, `min_seconds` / `max_seconds`, `max_ref_seconds`,
+  `ref_normalize_db`（`null` で無効）, `ref_ensure_max`, `num_candidates`, `decode_mode`, `max_text_len` / `max_caption_len`,
+  `cfg_scale_*`, `cfg_scale`, `cfg_guidance_mode`, `cfg_min_t` / `cfg_max_t`, `truncation_factor`, `rescale_k` / `rescale_sigma`,
+  `context_kv_cache`, `speaker_kv_scale` / `speaker_kv_min_t` / `speaker_kv_max_layers`, `t_schedule_mode`, `sway_coeff`,
+  `trim_tail`, `tail_*` に対応します。`seconds` も `speed` で割ります（本家と同じ）
+- 既定値の環境変数: `IRODORI_DEFAULT_RESPONSE_FORMAT`, `_NUM_STEPS`, `_T_SCHEDULE_MODE`, `_SWAY_COEFF`, `_DURATION_SCALE`,
+  `_MIN_SECONDS`, `_MAX_SECONDS`, `_CFG_SCALE_TEXT`, `_CFG_SCALE_SPEAKER`, `_CFG_GUIDANCE_MODE`, `_CFG_MIN_T`, `_CFG_MAX_T`,
+  `_CONTEXT_KV_CACHE`, `_MAX_REF_SECONDS`, `_REF_NORMALIZE_DB`, `_REF_ENSURE_MAX`, `_TRIM_TAIL`, `_TAIL_WINDOW_SIZE`,
+  `_TAIL_STD_THRESHOLD`, `_TAIL_MEAN_THRESHOLD`, `_NUM_CANDIDATES`, `_DECODE_MODE`。
+  モデルの指定も `IRODORI_CHECKPOINT` / `IRODORI_HF_CHECKPOINT` / `IRODORI_CODEC_REPO` / `IRODORI_MODEL_DEVICE` /
+  `IRODORI_CODEC_DEVICE` / `IRODORI_MODEL_PRECISION` / `IRODORI_CODEC_PRECISION` で行えます（コマンドラインが優先）
+- 参照はリクエストでも指定できます（`ref_wav(s)`, `ref_latent(s)`, `ref_embed`, `no_ref`。組み合わせの検証も本家と同じ）。
+  声フォルダの `*.pt` / `*.pth`（参照潜在）と、`voices.json` の `ref_latent(s)` / `no_ref` も使えます。
+  `none` のほか `no_ref` / `no-ref` / `null` / `text-only` も参照なしの声です
+- `response_format: "flac"` は純 C# のエンコーダーで作ります（可逆。WAV の約 4 割の大きさ。ffmpeg と libsndfile で
+  デコードして WAV とビット単位で同じことを確認）。FLAC はデコードしながらではなく、でき上がってから返します
+- `opus` は Ogg Opus（RFC 7845）です。符号化は Concentus（libopus の C# 移植、BSD-3-Clause）、Ogg への格納はこのリポジトリの実装で、
+  64 kbps（VBR）、20 ms のフレームです。ffmpeg と libsndfile でエラーなくデコードでき、長さも WAV とサンプル単位で同じです
+  （WAV の約 1/12 の大きさ。対数メルスペクトルの差 0.35、Whisper の書き起こしも同じ）
+- `mp3` / `aac` は、PATH にある ffmpeg（または環境変数 `IRODORI_FFMPEG`）を別のプロセスとして使います（本家と同じ
+  libmp3lame / aac）。ffmpeg は同梱もリンクもしていません。見つからないときは 400 と理由を返します
+- `irodori.lora_adapter` で LoRA アダプターのフォルダを指定できます（[下記](#lora-アダプター)。TorchSharp 版のみ）
+- Python 版との違い: 状態コードは以前のこのサーバーのまま（不明なモデル・声は 404。本家は 400 / 422）です
 
 ### 配布用の発行（CPU 版を同梱し、CUDA 版は必要な PC だけが取得）
 
@@ -405,9 +453,76 @@ ONNX 版の制限:
 - 初期ノイズは独自の乱数生成器で作るため、同じシードでも TorchSharp 版・Python 版とは別の音声になります
   （`OnnxRuntimeOptions.NoiseGenerator` で外部のノイズを与えることはできます）
 - `RefLatents`（`.pt` の参照潜在）は未対応です。`SpeakerKvScale` は `dit_context.onnx` のある（新しく書き出した）モデルフォルダでのみ使えます
-- v4 系（ModernBERT を使うチェックポイント）のみ対応です
+- v4 系（ModernBERT を使うチェックポイント）のみ対応です（v4-Large の T5Gemma 2 は TorchSharp 版のみ）
 - DirectML は検証時に実行時エラーとなったため対応していません（DirectML 自体も機能追加が止まっています）
 - AMD の GPU は手元に実機がなく、動作は未確認です（この PC の NVIDIA と Intel の GPU では WebGPU 経由で確認済み）
+
+## v4-Large
+
+`Aratako/Irodori-TTS-v4-Large` は、テキストとキャプションのエンコーダーに Google の T5Gemma 2（`google/t5gemma-2-1b-1b`）の
+双方向テキストエンコーダーを使います。トークナイザーも Gemma の BPE です。
+
+```powershell
+irodori-tts --hf-checkpoint Aratako/Irodori-TTS-v4-Large --model-device cuda --model-precision bf16 `
+            --text "こんにちは。" --caption "落ち着いた女性の声" --ref-wav reference.wav --output-wav out.wav
+```
+
+- 移植したもの: `Model/T5Gemma2.cs`（GQA のアテンション、Gemma の RMSNorm `x*(1+w)`、前後の正規化、
+  層の種類ごとの RoPE（全体: θ=1e6・線形 8 倍、スライディング: θ=1e4）、双方向のスライディングウィンドウ、EOI トークンの埋め込み）と
+  `Text/BpeTokenizer.cs`（追加トークンの最長一致、`Replace` 正規化、順位順のマージ、`byte_fallback`、`fuse_unk`）
+- 検証（CPU, fp32）:
+  - トークナイザー: HF `tokenizers` と 97 例（絵文字・特殊トークン・未知文字・制御文字・空白・ランダム文字列）で完全一致
+  - テキストエンコーダー: `transformers.T5Gemma2TextEncoder`（5.12.1）と、`max_length` まで詰め物した入力でビット単位で一致。
+    最も長い行までの詰め物（C# 版の動作）では最大誤差 1.3e-5（ピーク 17）。421 トークンの入力でウィンドウの境界も確認
+  - チェックポイントの 1391 個のテンソルすべてが、C# のモデルのパラメーター名・形と一致
+  - 同じ構造で小さくしたランダムなモデルで、`InferenceRuntime` の全経路（BPE トークナイザー → T5Gemma 2 → 話者パッチ 4 →
+    尺予測 `token_sum_dual_adarn_zero_no_aux` → RF サンプリング → デコード、参照なし・空のキャプションも）が動くことを確認
+- 実際の重みでの合成: 量子化版 `Aratako/Irodori-TTS-v4-Large-Quantized`（int8-weight-only、3.8 GB）を CPU（4 コア、メモリ 15 GB）で
+  合成し、Whisper で書き起こして文のとおりに読めていることを確認しました（最大メモリ 9.3 GB、8 ステップで 30 秒）。
+  fp32 版（重み 13 GB）は GPU + bf16（約 6.6 GB）か、メモリの多い PC で使ってください
+- ONNX 版は未対応です
+
+## 量子化チェックポイント
+
+本家の `quantize_checkpoint.py` で作られた torchao の量子化チェックポイント（`Aratako/Irodori-TTS-v4.1-Small-Quantized`、
+`Aratako/Irodori-TTS-v4-Large-Quantized` の各フォルダ）をそのまま読めます。torchao は不要です（ファイルの形式を読んで C# で実装）。
+
+```powershell
+irodori-tts --hf-checkpoint Aratako/Irodori-TTS-v4-Large-Quantized/int8-weight-only --text "こんにちは。" --caption "落ち着いた女性の声" --no-ref --output-wav out.wav
+```
+
+| 種類 | 対応 | 動き |
+| --- | --- | --- |
+| `int8-weight-only` | ○ | 重みは int8 のままメモリに置き、層ごとに計算の精度へ戻してから掛けます |
+| `int8-dynamic` | ○ | 重みは同じ。torchao は入力も int8 にして掛けますが、C# 版は入力を浮動小数点のまま掛けます（より精密で、結果は少し違う） |
+| `float8-weight-only` / `float8-dynamic` | ○ | 同じく float8（e4m3）のまま置きます。dynamic の入力の量子化はしません |
+| `int4-weight-only` | × | GPU 向けの詰め方（tile packed）のため未対応 |
+
+- 検証: torchao 0.16 自身が読んだ重み（`unflatten_tensor_state_dict` → `dequantize()`、bf16）と、332 層すべてでビット単位で一致
+  （`tools/parity/gen_quant_ref.py`）
+- v4.1-Small（RF、8 ステップ、同じシード）の fp32 版との違い（対数メルスペクトルの平均絶対差。シードを変えたときは 2.9）:
+  int8 は 0.17（同じ発話）、float8 は 1.4。Whisper の書き起こしは fp32 と int8 で同じ、float8 は一部が崩れました。float8 より int8 をおすすめします
+- CPU（4 コア）でのメモリと速度: fp32 は最大 5.2〜5.5 GB、int8 は 3.5〜3.9 GB。サンプリングは重みを戻す分だけ遅くなります
+  （fp32 5.2 秒 → int8 6.3 秒、float8 8.7 秒）。量子化されていない層は、チェックポイントの bf16 から指定の精度に戻します
+
+## LoRA アダプター
+
+本家の LoRA 学習（`train.py` + `configs/*_lora.yaml`）で保存されたアダプターのフォルダ（`adapter_config.json` と
+`adapter_model.safetensors` / `adapter_model.bin`）を、ベースのモデルにマージせずに使えます。
+
+```powershell
+irodori-tts --hf-checkpoint Aratako/Irodori-TTS-v4.1-Small --lora-adapter D:\lora\checkpoint_final --text "こんにちは。" --ref-wav ref.wav --output-wav out.wav
+```
+
+- リクエストごとに切り替えられます（`SamplingRequest.LoraAdapter`、サーバーでは `irodori.lora_adapter`）。`none` / `off` / `base` などで
+  ベースのモデルに戻ります。一度読んだアダプターは保持し、2 回目以降は参照を差し替えるだけです（初回の読み込みは約 0.2 秒）
+- 各層は `y = W x + b + B(A x) · lora_alpha / r` を計算します（rsLoRA は `/ sqrt(r)`、`rank_pattern` / `alpha_pattern` にも対応）。
+  `modules_to_save`（尺予測器など）とアダプターに入ったバイアスは、使う間だけ値を差し替え、外すと元の値に戻します。
+  量子化したベースのモデルにも使えます
+- 検証: 本家のモデルに本家の `apply_lora`（PEFT 0.21）でランダムなアダプターを付けた出力（テキスト状態・DiT の速度・尺予測）と、
+  DiT 用（`diffusion_attn_mlp` + 尺予測器）とテキストバックボーン用（`pretrained_backbone_attn_mlp` + バイアス）の 2 種類で一致
+  （相対誤差 1e-4 以内）。外した後はベースの出力とビット単位で同じ（`tools/parity/gen_lora_ref.py`）
+- 未対応: DoRA、Embedding / Conv への LoRA、ONNX 版
 
 ## テスト
 
@@ -417,7 +532,12 @@ dotnet test
 
 - `IrodoriTts.Tests`: テキスト正規化・トークナイザ・尺特徴量（Python 版のゴールデンデータ）と音声 DSP。
   トークナイザのテストは `IRODORI_TOKENIZER_DIR`（`tokenizer.json` のあるフォルダ）か HF キャッシュがあるときに実行。
-  `IRODORI_TEST_CODEC`（`weights.pth`）を設定すると、区切ったデコードが一度のデコードと一致するかも確認
+  `IRODORI_TEST_CODEC`（`weights.pth`）を設定すると、区切ったデコードが一度のデコードと一致するかも確認。
+  v4-Large の BPE トークナイザーのテストは `IRODORI_BPE_TOKENIZER_DIR` か HF キャッシュがあるときに、T5Gemma 2 のテストは
+  `IRODORI_TEST_T5GEMMA2_BACKBONE`（バックボーンの重み）と `IRODORI_TEST_T5GEMMA2_REF`（`tools/parity/gen_t5gemma2_ref.py` の出力）で実行。
+  量子化チェックポイントのテストは `IRODORI_TEST_QUANT_CHECKPOINTS`（`model.safetensors=参照.safetensors` を `;` 区切り。
+  参照は `tools/parity/gen_quant_ref.py` で作成）で、LoRA のテストは `IRODORI_TEST_LORA_CHECKPOINT`（ベースの model.safetensors）と
+  `IRODORI_TEST_LORA_DIR`（`tools/parity/gen_lora_ref.py` の出力フォルダ）で実行
 - `IrodoriTts.Server.Tests`: HTTP サーバーの全 API（偽エンジンで GPU 不要）。
   `IRODORI_TEST_CHECKPOINT`（`model.safetensors`）と `IRODORI_TEST_CODEC`（`weights.pth`）を設定すると、
   実モデルで HTTP → 合成 → WAV まで通すテストも実行（MeanFlow 版なら CPU で数十秒）
@@ -425,8 +545,8 @@ dotnet test
 ## Python 版との違い・未対応
 
 - **学習系は未移植**: `train.py`、LoRA 学習、Speaker Inversion の学習、MeanFlow 蒸留、`prepare_manifest.py`
-- **LoRA アダプタの動的ロード**（`--lora-adapter`）は未対応。マージ済みの safetensors（`convert_checkpoint_to_safetensors.py` の出力）は使えます
-- **torchao 量子化チェックポイント**（`-Quantized`）は未対応。通常の fp32 チェックポイントを使い、GPU では `bf16` を指定してください
+- **LoRA アダプタの動的ロード**（`--lora-adapter`）は TorchSharp 版のみ（[下記](#lora-アダプター)）。ONNX 版は未対応
+- **torchao 量子化チェックポイント**は int8 / float8 に対応（[下記](#量子化チェックポイント)）。int4-weight-only は未対応
 - **`.pt` 形式の学習チェックポイント**は未対応（safetensors に変換して使用）。参照潜在（`--ref-latent` の `.pt`）は読めます
 - **SilentCipher 透かし**は入りません（Python 版でもパッケージ未導入時は透かしなしで出力されます）
 - `torch.compile` / FlashAttention-3 による高速化は使っていません（SDPA を使用）
@@ -438,3 +558,13 @@ dotnet test
 
 コードは元リポジトリと同じ MIT License です（`LICENSE` を参照、Copyright (c) 2026 Aratako）。
 モデルの重みのライセンスは各 HuggingFace モデルカード（[Irodori-TTS-v4.1-Small](https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small) など）に従ってください。
+v4-Large は Google の T5Gemma 2 を含むため、Gemma の利用規約（Gemma Terms of Use / Prohibited Use Policy）にも従ってください。
+
+- 移植したコードは、本家（Irodori-TTS / Irodori-TTS-Server、MIT）からの移植と、ファイル形式・論文・仕様（safetensors、
+  torchao の量子化の格納形式、PEFT の LoRA、T5Gemma 2 / Gemma のトークナイザー、FLAC、Ogg / Opus の RFC）からの独自の実装です。
+  他のライセンスのコード（torchao は BSD-3-Clause、PEFT・transformers は Apache-2.0）は写していません。これらは
+  `tools/parity` の検証スクリプトで、比較の相手として使うだけです（配布物には入りません）
+- サーバーと CLI の発行物には、含まれるすべての第三者のファイルのライセンスを `license\`（`src/IrodoriTts.Server/license/README.txt`）として
+  同梱します。ONNX Runtime の WebGPU EP に入っている `dxil.dll` は Microsoft の再頒布可能コードで、受け取る人・再配布する人には
+  その条件（Microsoft とそのソフトウェアを保護する条件）が付きます。`dxcompiler.dll` は LLVM の NCSA ライセンスです
+- 依存を加えるときは MIT / BSD などの許容型のものに限り、GPL / LGPL のもの（LAME、ffmpeg など）はリンク・同梱しません

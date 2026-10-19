@@ -67,7 +67,10 @@ public sealed class InferenceRuntime : IDisposable
         _defaultCaptionMaxLen = captionMaxLen;
         _defaultMaxRefSeconds = maxRefSeconds;
         _fixedTargetLatentSteps = fixedTargetLatentSteps;
+        _lora = new LoraAdapterSet(model, modelDevice, model.DType);
     }
+
+    private readonly LoraAdapterSet _lora;
 
     public static ScalarType ResolveDType(string precision, Device device)
     {
@@ -111,45 +114,50 @@ public sealed class InferenceRuntime : IDisposable
 
     public static InferenceRuntime Load(RuntimeOptions options)
     {
+        NativeAllocator.Tune();
         var modelDevice = torch.device(options.ModelDevice);
         var codecDevice = torch.device(options.CodecDevice);
         var modelDType = ResolveDType(options.ModelPrecision, modelDevice);
         var codecDType = ResolveDType(options.CodecPrecision, codecDevice);
 
         using var st = new SafeTensorsFile(options.Checkpoint);
-        if (st.Metadata.ContainsKey("quantization_json") || st.Keys.Any(k => k.Contains("_qdata", StringComparison.Ordinal)))
-        {
-            throw new NotSupportedException("torchao-quantized checkpoints are not supported by the C# port; use a full-precision checkpoint.");
-        }
+        var quantization = QuantizedCheckpoint.Read(st);
         if (!st.Metadata.TryGetValue("config_json", out var configJson))
         {
             throw new InvalidDataException($"Missing required metadata field 'config_json' in checkpoint: {options.Checkpoint}");
         }
         var cfg = ModelConfig.FromJson(JsonNode.Parse(configJson)!.AsObject(), out var inferenceCfg);
-        ModernBertConfig? backboneCfg = null;
+        IPretrainedBackboneConfig? backboneCfg = null;
         if (st.Metadata.TryGetValue("text_encoder_config_json", out var encoderJson))
         {
-            backboneCfg = ModernBertConfig.FromJson(JsonNode.Parse(encoderJson)!.AsObject());
+            backboneCfg = PretrainedBackboneConfig.FromJson(JsonNode.Parse(encoderJson)!.AsObject());
         }
 
         TextToLatentRFDiT model;
         using (torch.no_grad())
         {
-            model = new TextToLatentRFDiT(cfg, backboneCfg);
-            var unexpected = WeightLoader.Load(model, k => st.Contains(k) ? st.Read(k) : null, st.Keys);
+            // Built without memory or random initialization, then given storage in the target dtype and filled
+            // from the checkpoint: no second copy of the weights, and quantized layers keep their int8 / float8 data.
+            using (ModelInit.OnMeta())
+            {
+                model = new TextToLatentRFDiT(cfg, backboneCfg);
+            }
+            var quantizedKeys = quantization?.Apply(model, st) ?? new HashSet<string>();
+            ModelInit.Materialize(model, modelDType);
+            var unexpected = WeightLoader.Load(model, k => st.Contains(k) ? st.Read(k) : null,
+                st.Keys.Where(k => !quantizedKeys.Contains(k)), readInto: st.TryReadInto);
             if (unexpected.Count > 0)
             {
                 Trace.TraceWarning($"Ignoring {unexpected.Count} unexpected checkpoint tensors, e.g. {string.Join(", ", unexpected.Take(5))}");
             }
         }
         model.eval();
-        if (modelDType != ScalarType.Float32) model.to(modelDType);
         model.to(modelDevice);
 
         var tokenizerDir = options.TokenizerDirectory ?? ResolveTokenizerDirectory(options.Checkpoint)
             ?? throw new FileNotFoundException(
                 $"No tokenizer/ directory found next to the checkpoint. Download tokenizer.json for '{cfg.TextTokenizerRepo}' and set TokenizerDirectory.");
-        var unigram = UnigramTokenizer.FromDirectory(tokenizerDir);
+        var unigram = SubwordTokenizer.FromDirectory(tokenizerDir);
         var tokenizer = new TextTokenizer(unigram, cfg.TextAddBos);
         if (!cfg.UsePretrainedTextEncoder && tokenizer.VocabSize != cfg.TextVocabSize)
         {
@@ -513,6 +521,10 @@ public sealed class InferenceRuntime : IDisposable
             sw.Restart();
         }
 
+        // Dynamic LoRA (unmerged; switched per request and kept loaded).
+        if (_lora.Use(req.LoraAdapter) is string loraMessage) Info(loraMessage);
+        if (!LoraAdapter.IsBase(req.LoraAdapter)) Stage("prepare_lora");
+
         var texts = Enumerable.Repeat(normalizedText, numCandidates).ToList();
         var (ids, mask) = _tokenizer.BatchEncode(texts, textMaxLen, padToLongest: true);
         var textIds = ToTensor(ids).to(_modelDevice);
@@ -693,6 +705,7 @@ public sealed class InferenceRuntime : IDisposable
 
     public void Dispose()
     {
+        _lora.Dispose();
         _model.Dispose();
         _codec.Dispose();
     }

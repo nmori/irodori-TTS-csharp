@@ -66,20 +66,8 @@ public sealed class SafeTensorsFile : IDisposable
         {
             throw new KeyNotFoundException($"Tensor '{key}' not found in safetensors file.");
         }
-        var scalarType = e.DType switch
-        {
-            "F32" => ScalarType.Float32,
-            "F16" => ScalarType.Float16,
-            "BF16" => ScalarType.BFloat16,
-            "F64" => ScalarType.Float64,
-            "I64" => ScalarType.Int64,
-            "I32" => ScalarType.Int32,
-            "I16" => ScalarType.Int16,
-            "I8" => ScalarType.Int8,
-            "U8" => ScalarType.Byte,
-            "BOOL" => ScalarType.Bool,
-            _ => throw new NotSupportedException($"Unsupported safetensors dtype {e.DType} for '{key}'."),
-        };
+        var scalarType = ScalarTypeOf(e.DType)
+            ?? throw new NotSupportedException($"Unsupported safetensors dtype {e.DType} for '{key}'.");
         long nbytes = e.End - e.Begin;
         var t = torch.empty(e.Shape, dtype: scalarType);
         if (nbytes == 0)
@@ -99,6 +87,52 @@ public sealed class SafeTensorsFile : IDisposable
         t.bytes = buffer;
         return t;
     }
+
+    /// <summary>
+    /// Read one tensor straight into <paramref name="destination"/> when it is a contiguous CPU tensor of the same
+    /// dtype and shape (no intermediate buffer or copy). Returns false, leaving it untouched, otherwise.
+    /// </summary>
+    public bool TryReadInto(string key, Tensor destination)
+    {
+        if (!_entries.TryGetValue(key, out var e)) return false;
+        if (destination.device_type != DeviceType.CPU || !destination.is_contiguous()
+            || !e.Shape.SequenceEqual(destination.shape) || ScalarTypeOf(e.DType) != destination.dtype)
+        {
+            return false;
+        }
+        long nbytes = e.End - e.Begin;
+        if (nbytes != destination.numel() * destination.element_size() || nbytes > int.MaxValue) return false;
+        if (nbytes == 0) return true;
+        // Span over the tensor's own storage.
+        var span = destination.bytes;
+        if (span.Length != nbytes) return false;
+        lock (_stream)
+        {
+            _stream.Seek(_dataStart + e.Begin, SeekOrigin.Begin);
+            _stream.ReadExactly(span);
+        }
+        return true;
+    }
+
+    private static ScalarType? ScalarTypeOf(string dtype) => dtype switch
+    {
+        "F32" => ScalarType.Float32,
+        "F16" => ScalarType.Float16,
+        "BF16" => ScalarType.BFloat16,
+        "F64" => ScalarType.Float64,
+        "I64" => ScalarType.Int64,
+        "I32" => ScalarType.Int32,
+        "I16" => ScalarType.Int16,
+        "I8" => ScalarType.Int8,
+        "U8" => ScalarType.Byte,
+        "BOOL" => ScalarType.Bool,
+        // TorchSharp has no float8 dtype: the raw bytes (see Model.Float8E4M3).
+        "F8_E4M3" => ScalarType.Byte,
+        _ => null,
+    };
+
+    /// <summary>The stored dtype name ("F32", "BF16", "I8", "F8_E4M3", ...).</summary>
+    public string GetDType(string key) => _entries[key].DType;
 
     /// <summary>Read one floating-point tensor as a float32 array without touching libtorch.</summary>
     public float[] ReadFloat32(string key, out long[] shape)

@@ -9,7 +9,7 @@ namespace IrodoriTts.Text;
 /// simple normalizers, Metaspace pre-tokenization, Viterbi segmentation with <c>fuse_unk</c>
 /// and <c>byte_fallback</c>.
 /// </summary>
-public sealed class UnigramTokenizer
+public sealed class UnigramTokenizer : ISubwordTokenizer
 {
     private const double UnkPenalty = 10.0;
 
@@ -158,7 +158,7 @@ public sealed class UnigramTokenizer
         return null;
     }
 
-    private static Func<string, string> BuildNormalizer(JsonElement n)
+    internal static Func<string, string> BuildNormalizer(JsonElement n)
     {
         if (n.ValueKind != JsonValueKind.Object)
         {

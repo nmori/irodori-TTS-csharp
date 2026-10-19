@@ -9,7 +9,7 @@ namespace IrodoriTts.Model;
 #pragma warning disable IDE1006
 
 /// <summary>Subset of the Hugging Face <c>ModernBertConfig</c> needed for inference.</summary>
-public sealed class ModernBertConfig
+public sealed class ModernBertConfig : IPretrainedBackboneConfig
 {
     public int VocabSize { get; init; } = 50368;
     public int HiddenSize { get; init; } = 768;
@@ -27,6 +27,8 @@ public sealed class ModernBertConfig
     public string[] LayerTypes { get; init; } = Array.Empty<string>();
 
     public int HeadDim => HiddenSize / NumAttentionHeads;
+
+    nn.Module<Tensor, Tensor, Tensor> IPretrainedBackboneConfig.CreateBackbone() => new ModernBertModel(this);
 
     /// <summary>Half window: tokens attend to neighbours with |i - j| &lt;= SlidingWindow.</summary>
     public int SlidingWindow => LocalAttention / 2;
@@ -85,7 +87,7 @@ public sealed class ModernBertEmbeddings : nn.Module<Tensor, Tensor>
     public ModernBertEmbeddings(ModernBertConfig cfg) : base(nameof(ModernBertEmbeddings))
     {
         if (cfg.NormBias) throw new NotSupportedException("ModernBERT norm_bias=True is not supported.");
-        tok_embeddings = nn.Embedding(cfg.VocabSize, cfg.HiddenSize);
+        tok_embeddings = new Embedding(cfg.VocabSize, cfg.HiddenSize);
         norm = new LayerNormNoBias(cfg.HiddenSize, cfg.NormEps);
         RegisterComponents();
     }
@@ -102,8 +104,8 @@ public sealed class ModernBertAttention : nn.Module
     {
         _heads = cfg.NumAttentionHeads;
         _headDim = cfg.HeadDim;
-        Wqkv = nn.Linear(cfg.HiddenSize, 3 * _headDim * _heads, hasBias: cfg.AttentionBias);
-        Wo = nn.Linear(cfg.HiddenSize, cfg.HiddenSize, hasBias: cfg.AttentionBias);
+        Wqkv = new Linear(cfg.HiddenSize, 3 * _headDim * _heads, hasBias: cfg.AttentionBias);
+        Wo = new Linear(cfg.HiddenSize, cfg.HiddenSize, hasBias: cfg.AttentionBias);
         RegisterComponents();
     }
 
@@ -147,8 +149,8 @@ public sealed class ModernBertMLP : nn.Module<Tensor, Tensor>
 
     public ModernBertMLP(ModernBertConfig cfg) : base(nameof(ModernBertMLP))
     {
-        Wi = nn.Linear(cfg.HiddenSize, cfg.IntermediateSize * 2, hasBias: cfg.MlpBias);
-        Wo = nn.Linear(cfg.IntermediateSize, cfg.HiddenSize, hasBias: cfg.MlpBias);
+        Wi = new Linear(cfg.HiddenSize, cfg.IntermediateSize * 2, hasBias: cfg.MlpBias);
+        Wo = new Linear(cfg.IntermediateSize, cfg.HiddenSize, hasBias: cfg.MlpBias);
         _approxTanh = cfg.HiddenActivation switch
         {
             "gelu" => false,
@@ -264,16 +266,41 @@ public sealed class ModernBertModel : nn.Module<Tensor, Tensor, Tensor>
     }
 }
 
+/// <summary>Config of a Hugging Face text backbone the port can run (ModernBERT, T5Gemma 2's text encoder).</summary>
+public interface IPretrainedBackboneConfig
+{
+    int HiddenSize { get; }
+
+    /// <summary>The backbone module: (input_ids, bool mask) → last_hidden_state.</summary>
+    nn.Module<Tensor, Tensor, Tensor> CreateBackbone();
+}
+
+public static class PretrainedBackboneConfig
+{
+    /// <summary>Read the checkpoint's <c>text_encoder_config_json</c> (by its <c>model_type</c>).</summary>
+    public static IPretrainedBackboneConfig FromJson(JsonObject json)
+    {
+        string modelType = json["model_type"]?.GetValue<string>() ?? "";
+        return modelType.ToLowerInvariant() switch
+        {
+            "modernbert" => ModernBertConfig.FromJson(json),
+            "t5gemma2" => T5Gemma2TextConfig.FromJson(json),
+            _ => throw new NotSupportedException(
+                $"Pretrained text encoder '{modelType}' is not supported (supported: modernbert, t5gemma2)."),
+        };
+    }
+}
+
 /// <summary>Hugging Face backbone shared by text and caption conditioning (<c>PretrainedTextBackbone</c>).</summary>
 public sealed class PretrainedTextBackbone : nn.Module<Tensor, Tensor, Tensor>
 {
-    private readonly ModernBertModel backbone;
+    private readonly nn.Module<Tensor, Tensor, Tensor> backbone;
 
     public int HiddenSize { get; }
 
-    public PretrainedTextBackbone(ModernBertConfig cfg) : base(nameof(PretrainedTextBackbone))
+    public PretrainedTextBackbone(IPretrainedBackboneConfig cfg) : base(nameof(PretrainedTextBackbone))
     {
-        backbone = new ModernBertModel(cfg);
+        backbone = cfg.CreateBackbone();
         HiddenSize = cfg.HiddenSize;
         RegisterComponents();
     }

@@ -214,8 +214,10 @@ public sealed class LibTorchRuntimeTests : IDisposable
         string? saved = Environment.GetEnvironmentVariable("IRODORI_TTS_CACHE");
         try
         {
-            Environment.SetEnvironmentVariable("IRODORI_TTS_CACHE", @"D:\irodori-cache");
-            Assert.Equal(Path.Combine(@"D:\irodori-cache", "runtime", $"{LibTorchRuntime.CudaPackage}-{LibTorchRuntime.CudaVersion}"),
+            // An absolute path on this OS (D:\irodori-cache on Windows; "D:\..." is not absolute on Linux).
+            string cache = OperatingSystem.IsWindows() ? @"D:\irodori-cache" : Path.Combine(Path.GetTempPath(), "irodori-cache");
+            Environment.SetEnvironmentVariable("IRODORI_TTS_CACHE", cache);
+            Assert.Equal(Path.Combine(cache, "runtime", $"{LibTorchRuntime.CudaPackage}-{LibTorchRuntime.CudaVersion}"),
                 LibTorchRuntime.DefaultCudaDirectory);
 
             string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);

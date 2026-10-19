@@ -52,6 +52,7 @@ internal static class LayerRunner
 public sealed class Snake1d : nn.Module<Tensor, Tensor>
 {
     private readonly Parameter alpha;
+    private Tensor? _invAlpha;
 
     public Snake1d(int channels) : base(nameof(Snake1d))
     {
@@ -61,10 +62,29 @@ public sealed class Snake1d : nn.Module<Tensor, Tensor>
 
     public override Tensor forward(Tensor x)
     {
+        if (_invAlpha is null || _invAlpha.device != alpha.device || _invAlpha.dtype != alpha.dtype)
+        {
+            _invAlpha?.Dispose();
+            // Cached across calls: must not belong to any caller's dispose scope.
+            _invAlpha = (alpha + 1e-9).reciprocal().DetachFromDisposeScope();
+        }
         var shape = x.shape;
         var xr = x.reshape(shape[0], shape[1], -1);
-        xr = xr + (alpha + 1e-9).reciprocal() * torch.sin(alpha * xr).pow(2);
-        return xr.reshape(shape);
+        // Same operations as x + 1/(alpha + 1e-9) * sin(alpha * x)^2 (bit for bit), but on one buffer:
+        // the activations are 48 kHz wide, so the temporaries of the plain form dominate the decoder's time.
+        var y = torch.mul(xr, alpha);
+        y.sin_();
+        y.mul_(y);
+        y.mul_(_invAlpha);
+        y.add_(xr);
+        return y.reshape(shape);
+    }
+
+    /// <summary>Drop the cached 1/alpha (call after reloading parameters).</summary>
+    public void ResetCache()
+    {
+        _invAlpha?.Dispose();
+        _invAlpha = null;
     }
 }
 
@@ -400,6 +420,7 @@ public sealed class DacVaeModel : nn.Module
         foreach (var (_, m) in named_modules())
         {
             if (m is NormConvBase c) c.ResetCache();
+            if (m is Snake1d s) s.ResetCache();
         }
     }
 }

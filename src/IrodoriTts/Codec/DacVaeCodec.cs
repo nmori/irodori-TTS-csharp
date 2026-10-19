@@ -33,6 +33,7 @@ public sealed class DacVaeCodec : IDisposable
     /// </summary>
     public static DacVaeCodec Load(string weightsPath, Device device, ScalarType dtype = ScalarType.Float32, double? normalizeDb = -16.0)
     {
+        NativeAllocator.Tune();
         var root = TorchPickle.Load(weightsPath) as Dictionary<object, object?>
             ?? throw new InvalidDataException($"Unexpected DACVAE checkpoint layout: {weightsPath}");
         var stateDict = TorchPickle.AsStateDict(root["state_dict"]);

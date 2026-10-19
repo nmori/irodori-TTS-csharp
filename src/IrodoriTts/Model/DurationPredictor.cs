@@ -38,13 +38,13 @@ public sealed class AttentionPooling : nn.Module<Tensor, Tensor, Tensor>
         _dim = dim;
         _heads = heads;
         _headDim = dim / heads;
-        query = nn.Parameter(torch.zeros(1, 1, dim));
+        query = nn.Parameter(ModelInit.Zeros(1, 1, dim));
         q_norm = new RMSNorm(dim, normEps);
         k_norm = new RMSNorm(dim, normEps);
-        wq = nn.Linear(dim, dim, hasBias: false);
-        wk = nn.Linear(dim, dim, hasBias: false);
-        wv = nn.Linear(dim, dim, hasBias: false);
-        wo = nn.Linear(dim, dim, hasBias: false);
+        wq = new Linear(dim, dim, hasBias: false);
+        wk = new Linear(dim, dim, hasBias: false);
+        wv = new Linear(dim, dim, hasBias: false);
+        wo = new Linear(dim, dim, hasBias: false);
         RegisterComponents();
     }
 
@@ -75,10 +75,10 @@ public sealed class CrossAttentionPooling : nn.Module<Tensor, Tensor, Tensor, Te
         _headDim = outputDim / heads;
         q_norm = new RMSNorm(queryDim, normEps);
         k_norm = new RMSNorm(contextDim, normEps);
-        wq = nn.Linear(queryDim, outputDim, hasBias: false);
-        wk = nn.Linear(contextDim, outputDim, hasBias: false);
-        wv = nn.Linear(contextDim, outputDim, hasBias: false);
-        wo = nn.Linear(outputDim, outputDim, hasBias: false);
+        wq = new Linear(queryDim, outputDim, hasBias: false);
+        wk = new Linear(contextDim, outputDim, hasBias: false);
+        wv = new Linear(contextDim, outputDim, hasBias: false);
+        wo = new Linear(outputDim, outputDim, hasBias: false);
         RegisterComponents();
     }
 
@@ -106,8 +106,8 @@ public sealed class DurationSwiGLUBlock : nn.Module
     {
         norm = new RMSNorm(dim, normEps);
         mlp = new SwiGLU(dim, hiddenDim);
-        if (condDim is int cd) modulation = nn.Linear(cd, dim * 3, hasBias: true);
-        if (captionCondDim is int ccd) caption_modulation = nn.Linear(ccd, dim * 3, hasBias: true);
+        if (condDim is int cd) modulation = new Linear(cd, dim * 3, hasBias: true);
+        if (captionCondDim is int ccd) caption_modulation = new Linear(ccd, dim * 3, hasBias: true);
         RegisterComponents();
     }
 
@@ -182,19 +182,19 @@ public sealed class DurationPredictor : nn.Module
         _speakerFusion = speakerFusion.Trim().ToLowerInvariant();
         _architecture = architecture.Trim().ToLowerInvariant();
 
-        if (speakerDim is int sd) null_speaker = nn.Parameter(torch.zeros(sd));
-        if (captionDim is int cd) null_caption = nn.Parameter(torch.zeros(cd));
+        if (speakerDim is int sd) null_speaker = nn.Parameter(ModelInit.Zeros(sd));
+        if (captionDim is int cd) null_caption = nn.Parameter(ModelInit.Zeros(cd));
 
         if (TokenSumArchitectures.Contains(_architecture))
         {
             if (speakerDim is null) throw new ArgumentException($"{_architecture} requires speaker_dim.");
             bool dual = _architecture == "token_sum_dual_adarn_zero_no_aux";
             if (dual && captionDim is null) throw new ArgumentException($"{_architecture} requires caption_dim.");
-            token_input_proj = nn.Linear(textDim, hiddenDim);
+            token_input_proj = new Linear(textDim, hiddenDim);
             token_blocks = new ModuleList<DurationSwiGLUBlock>(Enumerable.Range(0, layers)
                 .Select(_ => new DurationSwiGLUBlock(hiddenDim, hiddenDim, normEps, speakerDim, dual ? captionDim : null)).ToArray());
             token_out_norm = new RMSNorm(hiddenDim, normEps);
-            token_out_proj = nn.Linear(hiddenDim, 1);
+            token_out_proj = new Linear(hiddenDim, 1);
             RegisterComponents();
             return;
         }
@@ -215,7 +215,7 @@ public sealed class DurationPredictor : nn.Module
                 case "adarn":
                     inputDim = textDim + auxDim;
                     text_adarn_norm = new RMSNorm(textDim, normEps);
-                    text_adarn = nn.Linear(s, textDim * 2);
+                    text_adarn = new Linear(s, textDim * 2);
                     break;
                 case "adarn_zero":
                     inputDim = textDim + auxDim;
@@ -236,12 +236,12 @@ public sealed class DurationPredictor : nn.Module
         {
             inputDim = textDim + auxDim;
         }
-        input_proj = nn.Linear(inputDim, hiddenDim);
+        input_proj = new Linear(inputDim, hiddenDim);
         int? blockCond = _speakerFusion == "adarn_zero" ? speakerDim : null;
         blocks = new ModuleList<DurationSwiGLUBlock>(Enumerable.Range(0, layers)
             .Select(_ => new DurationSwiGLUBlock(hiddenDim, hiddenDim, normEps, blockCond, null)).ToArray());
         out_norm = new RMSNorm(hiddenDim, normEps);
-        out_proj = nn.Linear(hiddenDim, 1);
+        out_proj = new Linear(hiddenDim, 1);
         RegisterComponents();
     }
 
