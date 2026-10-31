@@ -92,6 +92,9 @@ public class HuggingFaceHubTests
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
+    /// <summary>What a finished download leaves: the file, and on Unix the (empty) lock file, which is kept there.</summary>
+    private static string[] Finished => OperatingSystem.IsWindows() ? ["file.bin"] : ["file.bin", "file.bin.lock"];
+
     [Fact]
     public async Task DroppedConnectionResumesFromThePartialFile()
     {
@@ -102,7 +105,7 @@ public class HuggingFaceHubTests
         await HuggingFaceHub.DownloadToAsync(server.Url, dir.File, null, Ct, retryDelay: _ => TimeSpan.Zero);
 
         Assert.Equal(body, await File.ReadAllBytesAsync(dir.File, Ct));
-        Assert.Equal(["file.bin"], Directory.GetFiles(dir.Path).Select(Path.GetFileName));  // no .partial / .etag left
+        Assert.Equal(Finished, Directory.GetFiles(dir.Path).Select(Path.GetFileName).Order());  // no .partial / .etag left
         Assert.Equal(3, server.Requests.Count);
         Assert.Null(server.Requests[0].Range);
         Assert.All(server.Requests.Skip(1), r => Assert.Equal(Tag, r.IfRange));
@@ -216,7 +219,7 @@ public class HuggingFaceHubTests
 
         Assert.Equal(body, await File.ReadAllBytesAsync(dir.File, Ct));
         Assert.Single(server.Requests);
-        Assert.Equal(["file.bin"], Directory.GetFiles(dir.Path).Select(Path.GetFileName));  // the lock file is gone
+        Assert.Equal(Finished, Directory.GetFiles(dir.Path).Select(Path.GetFileName).Order());
     }
 
     [Fact]
