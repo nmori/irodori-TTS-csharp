@@ -52,7 +52,9 @@ internal static class Cli
 
         Runtime (torch backend):
           --model-device <DEV>         cpu | cuda | cuda:N (default: cuda if available, else cpu)
-          --model-precision <P>        fp32 | bf16 | auto (default fp32; auto = bf16 on CUDA)
+          --model-precision <P>        fp32 | tf32 | bf16 | auto (default fp32; auto = bf16 on CUDA)
+                               tf32: fp32 weights, TF32 matmuls on CUDA (RF ~25% faster, audio almost the same)
+                               bf16: faster still, but may render the sentence differently
           --codec-device <DEV>         Default: same as --model-device
           --codec-precision <P>        fp32 | bf16 (default fp32)
 

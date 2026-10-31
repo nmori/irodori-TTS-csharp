@@ -39,6 +39,11 @@ public sealed class SamplerInputs
     public Tensor? SpeakerStateOverride { get; init; }
     public Tensor? SpeakerMaskOverride { get; init; }
     public required int SequenceLength { get; init; }
+    /// <summary>
+    /// The conditions already encoded from these inputs (e.g. for the duration predictor); the sampler then skips
+    /// its own <see cref="TextToLatentRFDiT.EncodeConditions"/> pass, which gives the same tensors.
+    /// </summary>
+    public EncodedConditions? Encoded { get; init; }
 }
 
 /// <summary>Options for <see cref="Samplers.SampleEulerRfCfg"/>.</summary>
@@ -62,12 +67,19 @@ public sealed class RfSamplerOptions
     public TimeScheduleMode TimeScheduleMode { get; init; } = TimeScheduleMode.Linear;
     public double SwayCoeff { get; init; } = -1.0;
     public SpeakerUncondMode SpeakerUncondMode { get; init; } = SpeakerUncondMode.Mask;
+    /// <summary>Checked before each step.</summary>
+    public CancellationToken CancellationToken { get; init; }
 }
 
 /// <summary>Euler samplers over the RF / MeanFlow ODE (ports of <c>rf.py</c> and <c>meanflow.py</c>).</summary>
 public static class Samplers
 {
     private sealed record Bundle(Tensor TextState, Tensor TextMask, Tensor? SpeakerState, Tensor? SpeakerMask, Tensor? CaptionState, Tensor? CaptionMask);
+
+    private static EncodedConditions Encode(TextToLatentRFDiT model, SamplerInputs inputs) =>
+        inputs.Encoded ?? model.EncodeConditions(
+            inputs.TextInputIds, inputs.TextMask, inputs.RefLatent, inputs.RefMask,
+            inputs.CaptionInputIds, inputs.CaptionMask, inputs.SpeakerStateOverride, inputs.SpeakerMaskOverride);
 
     private static Tensor? CatOptional(IEnumerable<Tensor?> values)
     {
@@ -187,9 +199,7 @@ public static class Samplers
             }
         }
 
-        var cond = model.EncodeConditions(
-            inputs.TextInputIds, inputs.TextMask, inputs.RefLatent, inputs.RefMask,
-            inputs.CaptionInputIds, inputs.CaptionMask, inputs.SpeakerStateOverride, inputs.SpeakerMaskOverride);
+        var cond = Encode(model, inputs);
 
         var textStateUncond = torch.zeros_like(cond.TextState);
         var textMaskUncond = torch.zeros_like(cond.TextMask);
@@ -300,6 +310,7 @@ public static class Samplers
 
         for (int i = 0; i < opt.NumSteps; i++)
         {
+            opt.CancellationToken.ThrowIfCancellationRequested();
             float t = schedule[i];
             float tNext = schedule[i + 1];
             Tensor next;
@@ -370,7 +381,8 @@ public static class Samplers
     }
 
     /// <summary>Linear MeanFlow sampler from time 1 to 0 (default: 4 NFE, CFG is baked in).</summary>
-    public static Tensor SampleEulerMeanFlow(TextToLatentRFDiT model, SamplerInputs inputs, int numSteps = 4, long seed = 0)
+    public static Tensor SampleEulerMeanFlow(TextToLatentRFDiT model, SamplerInputs inputs, int numSteps = 4, long seed = 0,
+        CancellationToken cancellationToken = default)
     {
         if (!model.Config.IsMeanFlow) throw new ArgumentException("SampleEulerMeanFlow requires a MeanFlow model.");
         if (numSteps <= 0) throw new ArgumentOutOfRangeException(nameof(numSteps));
@@ -381,13 +393,12 @@ public static class Samplers
         var (rng, rngDevice) = MakeRng(seed, device);
         var xT = Randn(new long[] { batch, inputs.SequenceLength, model.Config.PatchedLatentDim }, dtype, device, rng, rngDevice);
 
-        var enc = model.EncodeConditions(
-            inputs.TextInputIds, inputs.TextMask, inputs.RefLatent, inputs.RefMask,
-            inputs.CaptionInputIds, inputs.CaptionMask, inputs.SpeakerStateOverride, inputs.SpeakerMaskOverride);
+        var enc = Encode(model, inputs);
         var cache = model.BuildContextKvCache(enc.TextState, enc.SpeakerState, enc.CaptionState);
         var schedule = torch.linspace(1.0, 0.0, numSteps + 1, dtype: ScalarType.Float32).data<float>().ToArray();
         for (int i = 0; i < numSteps; i++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             Tensor next;
             using (var step = torch.NewDisposeScope())
             {

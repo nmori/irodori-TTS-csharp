@@ -327,6 +327,7 @@ public sealed class OnnxInferenceRuntime : IDisposable
     {
         lock (_lock)
         {
+            req.CancellationToken.ThrowIfCancellationRequested();
             return SynthesizeCore(req, log);
         }
     }
@@ -484,7 +485,7 @@ public sealed class OnnxInferenceRuntime : IDisposable
         var cond = new Conditions(textState, textMask, speaker?.State, speaker?.Mask, captionState, captionMask);
         var sampler = new ArraySampler(_dit, _ditContext, cfg, seed, _noise);
         float[] z = isMeanFlow
-            ? sampler.SampleMeanFlow(cond, batch, seqLen, numSteps)
+            ? sampler.SampleMeanFlow(cond, batch, seqLen, numSteps, req.CancellationToken)
             : sampler.SampleRf(cond, batch, seqLen, req, numSteps, hasCaptionText, messages, speakerKv);
         Stage(isMeanFlow ? "sample_meanflow" : "sample_rf");
 
@@ -508,7 +509,7 @@ public sealed class OnnxInferenceRuntime : IDisposable
             // The trimmed tail is not decoded; the first candidate can stream (OnAudioChunk).
             var onChunk = b == 0 ? req.OnAudioChunk : null;
             audios.Add(DecodeLatent(zb, latentSteps, maxSamples, onChunk is null ? null : (offset, piece, total) =>
-                onChunk(new AudioChunk(piece, offset, total, _sampleRate, seed))));
+                onChunk(new AudioChunk(piece, offset, total, _sampleRate, seed)), req.CancellationToken));
         }
         Stage("decode_latent");
         Info("warning: SilentCipher watermark is unavailable in the C# port; generated audio was not watermarked.");
@@ -540,7 +541,8 @@ public sealed class OnnxInferenceRuntime : IDisposable
     /// regardless of the utterance length. Frames after <paramref name="maxSamples"/> are not decoded. With
     /// <paramref name="onChunk"/> (offset, samples, total samples) each pass is handed out as soon as it is ready.
     /// </summary>
-    private float[] DecodeLatent(float[] latent, int frames, long maxSamples, Action<long, float[], long>? onChunk = null)
+    private float[] DecodeLatent(float[] latent, int frames, long maxSamples, Action<long, float[], long>? onChunk = null,
+        CancellationToken cancellationToken = default)
     {
         int dim = _latentDim;
         long total = Math.Min(maxSamples, (long)frames * _hop);
@@ -549,6 +551,7 @@ public sealed class OnnxInferenceRuntime : IDisposable
             onChunk is null ? 0 : StreamFirstChunkFrames);
         foreach (var span in plan)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var piece = new float[(span.To - span.From) * dim];
             Array.Copy(latent, (long)span.From * dim, piece, 0, piece.Length);
             using var lat = OrtHelpers.Float(piece, new long[] { 1, span.To - span.From, dim });

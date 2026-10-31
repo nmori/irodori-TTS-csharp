@@ -296,7 +296,8 @@ public static class LibTorchRuntime
         string downloads = dir + ".download";
         Directory.CreateDirectory(downloads);
         // Another server (or a second PlayEngine) may be installing the same runtime.
-        await using var lockFile = await AcquireLockAsync(Path.Combine(downloads, ".lock"), log, cancellationToken).ConfigureAwait(false);
+        await using var lockFile = await FileLock.AcquireAsync(Path.Combine(downloads, ".lock"),
+            () => log("[runtime] another process is installing the CUDA build of LibTorch; waiting ..."), cancellationToken).ConfigureAwait(false);
         if (IsCudaInstalled(dir)) return;
 
         var nupkgs = new Dictionary<string, string>();
@@ -457,22 +458,5 @@ public static class LibTorchRuntime
     {
         await using var s = File.OpenRead(path);
         return Convert.ToBase64String(await SHA512.HashDataAsync(s, cancellationToken).ConfigureAwait(false));
-    }
-
-    private static async Task<FileStream> AcquireLockAsync(string path, Action<string> log, CancellationToken cancellationToken)
-    {
-        bool told = false;
-        while (true)
-        {
-            try
-            {
-                return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 1, FileOptions.DeleteOnClose);
-            }
-            catch (IOException)
-            {
-                if (!told) { log("[runtime] another process is installing the CUDA build of LibTorch; waiting ..."); told = true; }
-                await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
-            }
-        }
     }
 }

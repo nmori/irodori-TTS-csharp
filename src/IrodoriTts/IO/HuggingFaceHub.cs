@@ -11,6 +11,9 @@ public static class HuggingFaceHub
 {
     private static readonly HttpClient Http = new() { Timeout = Timeout.InfiniteTimeSpan };
 
+    /// <summary>Tries per file before a dropped connection fails the download.</summary>
+    private const int MaxDownloadAttempts = 8;
+
     public static string CacheRoot
     {
         get
@@ -39,34 +42,109 @@ public static class HuggingFaceHub
         }
         Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
         var url = $"https://huggingface.co/{repoId}/resolve/{Uri.EscapeDataString(revision)}/{filename}";
-        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        await DownloadToAsync(url, localPath, progress, cancellationToken).ConfigureAwait(false);
+        return localPath;
+    }
+
+    /// <summary>
+    /// Download <paramref name="url"/> to <paramref name="localPath"/> through <c>localPath.partial</c>. A dropped
+    /// connection resumes from the bytes already written (Range), also on the next run, but only when the response
+    /// shows it is the same file: its validator (strong ETag, else Last-Modified) is kept in <c>.partial.etag</c>.
+    /// The Hugging Face CDN answers a Range with 206 even when If-Range does not match, so the check is done here.
+    /// </summary>
+    internal static async Task DownloadToAsync(string url, string localPath, IProgress<(long Downloaded, long? Total)>? progress,
+        CancellationToken cancellationToken, int maxAttempts = MaxDownloadAttempts, Func<int, TimeSpan>? retryDelay = null)
+    {
+        // One downloader per file across processes (e.g. two servers starting at once): another one moving the
+        // partial away mid-way would otherwise leave this one appending to a new, empty file.
+        await using var fileLock = await FileLock.AcquireAsync(localPath + ".lock", null, cancellationToken).ConfigureAwait(false);
+        if (File.Exists(localPath)) return;  // the other process finished it
         var token = Environment.GetEnvironmentVariable("HF_TOKEN");
-        if (!string.IsNullOrWhiteSpace(token))
-        {
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-        }
-        using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
-        if (!response.IsSuccessStatusCode)
-        {
-            throw new HttpRequestException($"Failed to download {url}: {(int)response.StatusCode} {response.ReasonPhrase}");
-        }
-        long? total = response.Content.Headers.ContentLength;
         var tmp = localPath + ".partial";
-        await using (var src = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false))
-        await using (var dst = File.Create(tmp))
+        var validatorPath = tmp + ".etag";
+        void StartOver()
         {
-            var buffer = new byte[1 << 20];
-            long done = 0;
-            int read;
-            while ((read = await src.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
+            File.Delete(tmp);
+            File.Delete(validatorPath);
+        }
+        for (int attempt = 1; ; attempt++)
+        {
+            // Every way round the loop counts, so a server that keeps refusing the partial cannot hold the start-up.
+            if (attempt > maxAttempts) throw new IOException($"Download of {url} did not complete in {maxAttempts} attempts.");
+            string? validator = File.Exists(validatorPath) ? File.ReadAllText(validatorPath) : null;
+            long done = File.Exists(tmp) ? new FileInfo(tmp).Length : 0;
+            if (done > 0 && validator is null) StartOver();  // nothing to tell whether it is still the same file
+            if (validator is null) done = 0;
+            try
             {
-                await dst.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
-                done += read;
-                progress?.Report((done, total));
+                using var request = new HttpRequestMessage(HttpMethod.Get, url);
+                if (!string.IsNullOrWhiteSpace(token))
+                {
+                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                }
+                if (done > 0)
+                {
+                    request.Headers.Range = new RangeHeaderValue(done, null);
+                    request.Headers.TryAddWithoutValidation("If-Range", validator);  // servers that honour it send 200
+                }
+                using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+                if (response.StatusCode == System.Net.HttpStatusCode.RequestedRangeNotSatisfiable)
+                {
+                    StartOver();  // the file changed (or the partial is longer than it)
+                    continue;
+                }
+                if (!response.IsSuccessStatusCode)
+                {
+                    throw new HttpRequestException($"Failed to download {url}: {(int)response.StatusCode} {response.ReasonPhrase}", null, response.StatusCode);
+                }
+                string? received = Validator(response);
+                bool resumed = response.StatusCode == System.Net.HttpStatusCode.PartialContent;
+                if (resumed && (received != validator || response.Content.Headers.ContentRange?.From != done))
+                {
+                    StartOver();  // another file (or another range) than the one the partial holds
+                    continue;
+                }
+                long? total = response.Content.Headers.ContentRange?.Length ?? response.Content.Headers.ContentLength + (resumed ? done : 0);
+                await using (var src = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false))
+                await using (var dst = new FileStream(tmp, resumed ? FileMode.Append : FileMode.Create, FileAccess.Write))
+                {
+                    if (!resumed)
+                    {
+                        // The old partial is gone (FileMode.Create) before the new file's validator is kept, and the
+                        // validator is kept before any of its bytes: a stop in between never pairs one file's
+                        // validator with another file's bytes.
+                        done = 0;
+                        if (received is null) File.Delete(validatorPath);
+                        else File.WriteAllText(validatorPath, received);
+                    }
+                    var buffer = new byte[1 << 20];
+                    int read;
+                    while ((read = await src.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
+                    {
+                        await dst.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+                        done += read;
+                        progress?.Report((done, total));
+                    }
+                }
+                if (total is long t && done != t) throw new IOException($"Download of {url} ended at {done} of {t} bytes.");
+                break;
+            }
+            catch (Exception ex) when (ex is IOException or HttpRequestException { StatusCode: null or >= System.Net.HttpStatusCode.InternalServerError }
+                                       && attempt < maxAttempts && !cancellationToken.IsCancellationRequested)
+            {
+                var delay = retryDelay?.Invoke(attempt) ?? TimeSpan.FromSeconds(Math.Min(30, 2 * attempt));
+                await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
             }
         }
+        File.Delete(validatorPath);
         File.Move(tmp, localPath, overwrite: true);
-        return localPath;
+    }
+
+    /// <summary>What identifies the file in a response: a strong ETag, else Last-Modified (null when neither).</summary>
+    private static string? Validator(HttpResponseMessage response)
+    {
+        if (response.Headers.ETag is { IsWeak: false } etag) return etag.Tag;
+        return response.Content.Headers.LastModified?.ToString("R");
     }
 
     /// <summary>

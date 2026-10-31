@@ -279,7 +279,9 @@ internal static class Args
           --backend auto|torch|onnx  --onnx-dir <DIR>  --onnx-device webgpu|cpu  --onnx-encoders-on-cpu  --onnx-decoder-fp32
           --webgpu-power high-performance|low-power
           --checkpoint <PATH> | --hf-checkpoint <REPO>   --codec-weights <PATH> | --codec-repo <REPO>
-          --model-device cpu|cuda  --model-precision fp32|bf16|auto (auto: bf16 on CUDA, else fp32)  --codec-device <D>  --codec-precision <P>
+          --model-device cpu|cuda  --model-precision fp32|tf32|bf16|auto (auto: bf16 on CUDA, else fp32)  --codec-device <D>  --codec-precision <P>
+                                     tf32: TF32 matmuls on CUDA (RF ~25% faster, audio almost the same);
+                                     bf16: faster still, but may render the sentence differently
           --no-cuda-download         Do not download the CUDA build of LibTorch on an NVIDIA PC (use the CPU)
           --cuda-runtime-dir <DIR>   Keep / find the CUDA build of LibTorch in DIR. Default: downloaded once,
                                      when an NVIDIA driver is present, to %IRODORI_TTS_CACHE%\runtime or else

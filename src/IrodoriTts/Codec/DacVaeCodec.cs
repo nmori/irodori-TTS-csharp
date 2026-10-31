@@ -120,7 +120,8 @@ public sealed class DacVaeCodec : IDisposable
     public int DecodeContextFrames { get; set; } = 8;
 
     /// <summary>(B, T, D) latents → (B, 1, samples) float32 audio on the CPU.</summary>
-    public Tensor DecodeLatent(Tensor latent)
+    /// <param name="cancellationToken">Checked before each decoder pass.</param>
+    public Tensor DecodeLatent(Tensor latent, CancellationToken cancellationToken = default)
     {
         if (latent.dim() != 3) throw new ArgumentException("Expected latent shape (B, T, D).");
         using var _ = torch.inference_mode();
@@ -129,15 +130,19 @@ public sealed class DacVaeCodec : IDisposable
         int context = Math.Max(0, DecodeContextFrames);
         if (chunk <= 0 || frames <= chunk + 2L * context)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             using var scope = torch.NewDisposeScope();
             var z = latent.transpose(1, 2).contiguous().to(Device).to(DType);
             return _model.Decode(z).to(ScalarType.Float32).cpu().MoveToOuterDisposeScope();
         }
 
         int hop = HopLength;
+        // Own scope: a cancelled decode frees the output buffer here even when the caller has no dispose scope.
+        using var outer = torch.NewDisposeScope();
         var output = torch.empty(new long[] { latent.shape[0], 1, frames * hop }, dtype: ScalarType.Float32);
         for (long start = 0; start < frames; start += chunk)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             using var scope = torch.NewDisposeScope();
             long end = Math.Min(frames, start + chunk);
             long from = Math.Max(0, start - context);
@@ -147,7 +152,7 @@ public sealed class DacVaeCodec : IDisposable
             var keep = audio[TensorIndex.Ellipsis, TensorIndex.Slice((start - from) * hop, (end - from) * hop)];
             output[TensorIndex.Ellipsis, TensorIndex.Slice(start * hop, end * hop)] = keep.to(ScalarType.Float32).cpu();
         }
-        return output;
+        return output.MoveToOuterDisposeScope();
     }
 
     /// <summary>
@@ -156,7 +161,8 @@ public sealed class DacVaeCodec : IDisposable
     /// audio is handed to <paramref name="onChunk"/> (sample offset, samples) as soon as it is ready.
     /// </summary>
     /// <param name="firstChunkFrames">Size of the first pass (see <see cref="DecodePlan.Build"/>); 0 = <see cref="DecodeChunkFrames"/>.</param>
-    public float[] DecodeStream(Tensor latent, long maxSamples, int firstChunkFrames = 0, Action<long, float[]>? onChunk = null)
+    public float[] DecodeStream(Tensor latent, long maxSamples, int firstChunkFrames = 0, Action<long, float[]>? onChunk = null,
+        CancellationToken cancellationToken = default)
     {
         if (latent.dim() != 3 || latent.shape[0] != 1) throw new ArgumentException("Expected latent shape (1, T, D).");
         using var _ = torch.inference_mode();
@@ -167,6 +173,7 @@ public sealed class DacVaeCodec : IDisposable
         var plan = DecodePlan.Build(frames, (int)((total + hop - 1) / hop), DecodeChunkFrames, DecodeContextFrames, firstChunkFrames);
         foreach (var span in plan)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             using var scope = torch.NewDisposeScope();
             var z = latent[TensorIndex.Colon, TensorIndex.Slice(span.From, span.To)].transpose(1, 2).contiguous().to(Device).to(DType);
             var audio = _model.Decode(z)[0, 0].to(ScalarType.Float32).cpu();

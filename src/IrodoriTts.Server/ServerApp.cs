@@ -406,6 +406,8 @@ public static class ServerApp
             if (pieces.Count > 1 && req.Seed is null) req.Seed = Random.Shared.NextInt64(long.MaxValue);
             var response = http.HttpContext.Response;
             var aborted = http.HttpContext.RequestAborted;
+            // A client that has gone stops its synthesis (between steps), so the requests behind it do not wait for it.
+            req.CancellationToken = aborted;
             var sw = Stopwatch.StartNew();
             SamplingRequest PieceRequest(string text)
             {
@@ -465,6 +467,11 @@ public static class ServerApp
                 catch (Exception ex) when (ex is ArgumentException or FileNotFoundException or InvalidDataException or NotSupportedException)
                 {
                     return Error(400, ex.Message);
+                }
+                catch (OperationCanceledException) when (aborted.IsCancellationRequested)
+                {
+                    o.Log($"[speech] client disconnected after {sw.Elapsed.TotalSeconds:F2}s");
+                    return Results.Empty;
                 }
                 LogSpeech(result.Audio.Length, result.SampleRate, result.UsedSeed, result.Audio);
                 SetHeaders(result.UsedSeed, result.SampleRate);

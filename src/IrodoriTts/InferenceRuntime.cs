@@ -23,9 +23,14 @@ public sealed class RuntimeOptions
     public string? TokenizerDirectory { get; init; }
     /// <summary>"cpu", "cuda", "cuda:1", ...</summary>
     public string ModelDevice { get; init; } = "cpu";
-    /// <summary>"fp32" or "bf16" (bf16 requires CUDA).</summary>
+    /// <summary>
+    /// "fp32", "tf32" or "bf16" (tf32 / bf16 require CUDA). tf32 keeps the fp32 weights and lets cuBLAS multiply
+    /// fp32 matrices in TF32 (a process-wide setting): RF sampling about a quarter faster, audio almost the same.
+    /// bf16 is faster still but the sampling can drift to a different rendition of the sentence.
+    /// </summary>
     public string ModelPrecision { get; init; } = "fp32";
     public string CodecDevice { get; init; } = "cpu";
+    /// <summary>"fp32" or "bf16" (bf16 requires CUDA). The codec's convolutions use TF32 on the GPU either way (cuDNN default).</summary>
     public string CodecPrecision { get; init; } = "fp32";
     /// <summary>Where encoded reference clips are kept across runs (null: memory only).</summary>
     public string? ReferenceCacheDirectory { get; init; } = ReferenceLatentCache.DefaultDirectory;
@@ -78,13 +83,31 @@ public sealed class InferenceRuntime : IDisposable
         {
             case "fp32":
                 return ScalarType.Float32;
+            case "tf32":
+                if (device.type != DeviceType.CUDA) throw new ArgumentException("precision='tf32' requires a CUDA device.");
+                return ScalarType.Float32;
             case "bf16":
                 if (device.type != DeviceType.CUDA) throw new ArgumentException("precision='bf16' currently requires a CUDA device.");
                 return ScalarType.BFloat16;
             default:
-                throw new ArgumentException($"Unsupported precision {precision}. Expected fp32 or bf16.");
+                throw new ArgumentException($"Unsupported precision {precision}. Expected fp32, tf32 or bf16.");
         }
     }
+
+    /// <summary>
+    /// Codec precision: fp32 or bf16. tf32 is refused: the codec's convolutions already use TF32 on the GPU
+    /// (cuDNN default), so it would mean the same as fp32.
+    /// </summary>
+    public static ScalarType ResolveCodecDType(string precision, Device device)
+    {
+        if (IsTf32(precision))
+        {
+            throw new ArgumentException("codec_precision='tf32' is not needed: the codec's convolutions already use TF32 on the GPU. Use fp32 or bf16.");
+        }
+        return ResolveDType(precision, device);
+    }
+
+    private static bool IsTf32(string precision) => precision.Trim().Equals("tf32", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Download (if needed) a Hugging Face checkpoint + codec and load the runtime.</summary>
     public static async Task<InferenceRuntime> FromHuggingFaceAsync(
@@ -97,6 +120,9 @@ public sealed class InferenceRuntime : IDisposable
         IProgress<(string File, long Downloaded, long? Total)>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        // A precision the device cannot run fails now, not after the downloads.
+        ResolveDType(modelPrecision, torch.device(modelDevice));
+        ResolveCodecDType(codecPrecision, torch.device(codecDevice ?? modelDevice));
         var ckpt = await HuggingFaceHub.DownloadCheckpointAsync(checkpointRepo, progress, cancellationToken).ConfigureAwait(false);
         var codec = await HuggingFaceHub.DownloadAsync(codecRepo, "weights.pth",
             progress: progress is null ? null : new Progress<(long D, long? T)>(x => progress.Report(("weights.pth", x.D, x.T))),
@@ -118,7 +144,9 @@ public sealed class InferenceRuntime : IDisposable
         var modelDevice = torch.device(options.ModelDevice);
         var codecDevice = torch.device(options.CodecDevice);
         var modelDType = ResolveDType(options.ModelPrecision, modelDevice);
-        var codecDType = ResolveDType(options.CodecPrecision, codecDevice);
+        var codecDType = ResolveCodecDType(options.CodecPrecision, codecDevice);
+        // Process-wide, so it is set on every load: a runtime loaded later in the process decides for all.
+        if (modelDevice.type == DeviceType.CUDA) torch.backends.cuda.matmul.allow_tf32 = IsTf32(options.ModelPrecision);
 
         using var st = new SafeTensorsFile(options.Checkpoint);
         var quantization = QuantizedCheckpoint.Read(st);
@@ -409,6 +437,7 @@ public sealed class InferenceRuntime : IDisposable
     {
         lock (_lock)
         {
+            req.CancellationToken.ThrowIfCancellationRequested();
             using var inference = torch.inference_mode();
             using var scope = torch.NewDisposeScope();
             return SynthesizeCore(req, log);
@@ -554,6 +583,7 @@ public sealed class InferenceRuntime : IDisposable
         int sr = _codec.SampleRate;
         int latentSteps;
         long targetSamples;
+        EncodedConditions? encoded = null;  // from the duration predictor, reused by the sampler
         if (req.Seconds is double manual)
         {
             double clamped = Math.Min(req.MaxSeconds, Math.Max(req.MinSeconds, manual));
@@ -576,7 +606,7 @@ public sealed class InferenceRuntime : IDisposable
                 for (int j = 0; j < row.Length; j++) feats[b, j] = row[j];
             }
             var durationFeatures = torch.tensor(feats).to(_modelDevice);
-            var enc = _model.EncodeConditions(textIds, textMask, refLatent, refMask, captionIds, captionMask, speakerOverride, speakerOverrideMask);
+            var enc = encoded = _model.EncodeConditions(textIds, textMask, refLatent, refMask, captionIds, captionMask, speakerOverride, speakerOverrideMask);
             Tensor? hasCaption = cfg.UseCaptionCondition
                 ? torch.full(new long[] { numCandidates }, hasCaptionText, dtype: ScalarType.Bool, device: _modelDevice)
                 : null;
@@ -615,11 +645,12 @@ public sealed class InferenceRuntime : IDisposable
             SpeakerStateOverride = speakerOverride,
             SpeakerMaskOverride = speakerOverrideMask,
             SequenceLength = patchedSteps,
+            Encoded = encoded,
         };
         Tensor zPatched;
         if (isMeanFlow)
         {
-            zPatched = Samplers.SampleEulerMeanFlow(_model, inputs, numSteps, usedSeed);
+            zPatched = Samplers.SampleEulerMeanFlow(_model, inputs, numSteps, usedSeed, req.CancellationToken);
             Stage("sample_meanflow");
         }
         else
@@ -644,6 +675,7 @@ public sealed class InferenceRuntime : IDisposable
                 TimeScheduleMode = req.TimeScheduleMode,
                 SwayCoeff = req.SwayCoeff,
                 SpeakerUncondMode = req.SpeakerUncondMode,
+                CancellationToken = req.CancellationToken,
             });
             Stage("sample_rf");
         }
@@ -653,7 +685,7 @@ public sealed class InferenceRuntime : IDisposable
         z = z[TensorIndex.Colon, TensorIndex.Slice(0, latentSteps)].to(ScalarType.Float32).cpu();
 
         var audios = new List<float[]>();
-        Tensor? batchAudio = req.SequentialDecode ? null : _codec.DecodeLatent(z);
+        Tensor? batchAudio = req.SequentialDecode ? null : _codec.DecodeLatent(z, req.CancellationToken);
         for (int i = 0; i < numCandidates; i++)
         {
             long maxSamples = targetSamples;
@@ -674,7 +706,8 @@ public sealed class InferenceRuntime : IDisposable
                 long totalSamples = Math.Min(maxSamples, (long)latentSteps * hop);
                 audios.Add(_codec.DecodeStream(z[TensorIndex.Slice(i, i + 1)], maxSamples,
                     onChunk is null ? 0 : StreamFirstChunkFrames,
-                    onChunk is null ? null : (offset, piece) => onChunk(new AudioChunk(piece, offset, totalSamples, sr, usedSeed))));
+                    onChunk is null ? null : (offset, piece) => onChunk(new AudioChunk(piece, offset, totalSamples, sr, usedSeed)),
+                    req.CancellationToken));
                 continue;
             }
             var samples = batchAudio[i][0].data<float>().ToArray();
