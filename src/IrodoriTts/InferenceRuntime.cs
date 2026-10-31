@@ -682,7 +682,7 @@ public sealed class InferenceRuntime : IDisposable
         z = z[TensorIndex.Colon, TensorIndex.Slice(0, latentSteps)].to(ScalarType.Float32).cpu();
 
         var audios = new List<float[]>();
-        Tensor? batchAudio = req.SequentialDecode ? null : _codec.DecodeLatent(z);
+        Tensor? batchAudio = req.SequentialDecode ? null : _codec.DecodeLatent(z, req.CancellationToken);
         for (int i = 0; i < numCandidates; i++)
         {
             long maxSamples = targetSamples;

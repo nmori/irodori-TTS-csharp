@@ -23,6 +23,8 @@ public class HuggingFaceHubTests
         public byte[] Body { get; set; }
         public string ETag { get; set; } = Tag;
         public int Status { get; set; } = 200;
+        /// <summary>Answer a Range whose If-Range does not match with 200 and the whole file (RFC 9110).</summary>
+        public bool HonourIfRange { get; set; }
 
         public FlakyServer(byte[] body, int dropFirst)
         {
@@ -42,6 +44,7 @@ public class HuggingFaceHubTests
                         lines.FirstOrDefault(l => l.StartsWith(name + ":", StringComparison.OrdinalIgnoreCase))?[(name.Length + 1)..].Trim();
                     string? range = Header("Range");
                     lock (Requests) Requests.Add((range, Header("If-Range")));
+                    if (HonourIfRange && Header("If-Range") is string ifRange && ifRange != ETag) range = null;
                     if (Status != 200)
                     {
                         await stream.WriteAsync(Encoding.ASCII.GetBytes($"HTTP/1.1 {Status} Nope\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"), _stop.Token);
@@ -161,6 +164,42 @@ public class HuggingFaceHubTests
             Ct, maxAttempts: 3, retryDelay: _ => TimeSpan.Zero));
         Assert.Equal(3, server.Requests.Count);
         Assert.False(File.Exists(dir.File));
+    }
+
+    [Fact]
+    public async Task StopWhileReplacingAChangedFileLeavesTheNewFilesValidator()
+    {
+        // The server honours If-Range, so the resume gets the new file whole (200), and the connection drops halfway.
+        var old = Body(1_000_000, seed: 1);
+        var body = Body(1_000_000, seed: 2);
+        await using var server = new FlakyServer(body, dropFirst: 1) { ETag = "\"v2\"", HonourIfRange = true };
+        using var dir = new TempDir();
+        await File.WriteAllBytesAsync(dir.File + ".partial", old[..400_000], Ct);
+        await File.WriteAllTextAsync(dir.File + ".partial.etag", Tag, Ct);
+
+        await Assert.ThrowsAnyAsync<IOException>(() => HuggingFaceHub.DownloadToAsync(server.Url, dir.File, null, Ct, maxAttempts: 1));
+
+        // What is left is a prefix of the new file under the new file's validator, so the next run can resume it.
+        var partial = await File.ReadAllBytesAsync(dir.File + ".partial", Ct);
+        Assert.Equal(body[..partial.Length], partial);
+        Assert.Equal("\"v2\"", await File.ReadAllTextAsync(dir.File + ".partial.etag", Ct));
+        await HuggingFaceHub.DownloadToAsync(server.Url, dir.File, null, Ct);
+        Assert.Equal(body, await File.ReadAllBytesAsync(dir.File, Ct));
+    }
+
+    [Theory]
+    [InlineData(416)]  // a server that keeps refusing every range
+    [InlineData(206)]  // a 206 that never matches the partial (no Content-Range)
+    public async Task RestartsAreBoundedToo(int status)
+    {
+        await using var server = new FlakyServer(Body(10), dropFirst: 0) { Status = status };
+        using var dir = new TempDir();
+        await File.WriteAllBytesAsync(dir.File + ".partial", new byte[5], Ct);
+        await File.WriteAllTextAsync(dir.File + ".partial.etag", Tag, Ct);
+
+        await Assert.ThrowsAsync<IOException>(() => HuggingFaceHub.DownloadToAsync(server.Url, dir.File, null,
+            Ct, maxAttempts: 3, retryDelay: _ => TimeSpan.Zero));
+        Assert.Equal(3, server.Requests.Count);
     }
 
     [Fact]

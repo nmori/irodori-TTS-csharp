@@ -65,6 +65,8 @@ public static class HuggingFaceHub
         }
         for (int attempt = 1; ; attempt++)
         {
+            // Every way round the loop counts, so a server that keeps refusing the partial cannot hold the start-up.
+            if (attempt > maxAttempts) throw new IOException($"Download of {url} did not complete in {maxAttempts} attempts.");
             string? validator = File.Exists(validatorPath) ? File.ReadAllText(validatorPath) : null;
             long done = File.Exists(tmp) ? new FileInfo(tmp).Length : 0;
             if (done > 0 && validator is null) StartOver();  // nothing to tell whether it is still the same file
@@ -98,16 +100,19 @@ public static class HuggingFaceHub
                     StartOver();  // another file (or another range) than the one the partial holds
                     continue;
                 }
-                if (!resumed)
-                {
-                    done = 0;
-                    if (received is null) File.Delete(validatorPath);
-                    else File.WriteAllText(validatorPath, received);
-                }
-                long? total = response.Content.Headers.ContentRange?.Length ?? response.Content.Headers.ContentLength + done;
+                long? total = response.Content.Headers.ContentRange?.Length ?? response.Content.Headers.ContentLength + (resumed ? done : 0);
                 await using (var src = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false))
                 await using (var dst = new FileStream(tmp, resumed ? FileMode.Append : FileMode.Create, FileAccess.Write))
                 {
+                    if (!resumed)
+                    {
+                        // The old partial is gone (FileMode.Create) before the new file's validator is kept, and the
+                        // validator is kept before any of its bytes: a stop in between never pairs one file's
+                        // validator with another file's bytes.
+                        done = 0;
+                        if (received is null) File.Delete(validatorPath);
+                        else File.WriteAllText(validatorPath, received);
+                    }
                     var buffer = new byte[1 << 20];
                     int read;
                     while ((read = await src.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
