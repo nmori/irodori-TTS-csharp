@@ -55,6 +55,10 @@ public static class HuggingFaceHub
     internal static async Task DownloadToAsync(string url, string localPath, IProgress<(long Downloaded, long? Total)>? progress,
         CancellationToken cancellationToken, int maxAttempts = MaxDownloadAttempts, Func<int, TimeSpan>? retryDelay = null)
     {
+        // One downloader per file across processes (e.g. two servers starting at once): another one moving the
+        // partial away mid-way would otherwise leave this one appending to a new, empty file.
+        await using var fileLock = await FileLock.AcquireAsync(localPath + ".lock", null, cancellationToken).ConfigureAwait(false);
+        if (File.Exists(localPath)) return;  // the other process finished it
         var token = Environment.GetEnvironmentVariable("HF_TOKEN");
         var tmp = localPath + ".partial";
         var validatorPath = tmp + ".etag";

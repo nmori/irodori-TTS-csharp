@@ -203,6 +203,23 @@ public class HuggingFaceHubTests
     }
 
     [Fact]
+    public async Task TwoDownloadsOfOneFileTakeTurns()
+    {
+        var body = Body(2_000_000);
+        await using var server = new FlakyServer(body, dropFirst: 0);
+        using var dir = new TempDir();
+
+        // The second waits for the first (lock file) and then finds the finished file instead of fetching it again.
+        await Task.WhenAll(
+            HuggingFaceHub.DownloadToAsync(server.Url, dir.File, null, Ct),
+            HuggingFaceHub.DownloadToAsync(server.Url, dir.File, null, Ct));
+
+        Assert.Equal(body, await File.ReadAllBytesAsync(dir.File, Ct));
+        Assert.Single(server.Requests);
+        Assert.Equal(["file.bin"], Directory.GetFiles(dir.Path).Select(Path.GetFileName));  // the lock file is gone
+    }
+
+    [Fact]
     public async Task NotFoundIsNotRetried()
     {
         await using var server = new FlakyServer(Body(10), dropFirst: 0) { Status = 404 };
