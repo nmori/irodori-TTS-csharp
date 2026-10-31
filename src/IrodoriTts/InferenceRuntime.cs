@@ -120,6 +120,9 @@ public sealed class InferenceRuntime : IDisposable
         IProgress<(string File, long Downloaded, long? Total)>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        // A precision the device cannot run fails now, not after the downloads.
+        ResolveDType(modelPrecision, torch.device(modelDevice));
+        ResolveCodecDType(codecPrecision, torch.device(codecDevice ?? modelDevice));
         var ckpt = await HuggingFaceHub.DownloadCheckpointAsync(checkpointRepo, progress, cancellationToken).ConfigureAwait(false);
         var codec = await HuggingFaceHub.DownloadAsync(codecRepo, "weights.pth",
             progress: progress is null ? null : new Progress<(long D, long? T)>(x => progress.Report(("weights.pth", x.D, x.T))),

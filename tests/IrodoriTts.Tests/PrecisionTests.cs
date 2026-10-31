@@ -35,6 +35,16 @@ public class PrecisionTests
     }
 
     [Fact]
+    public async Task HuggingFaceFactoryRejectsThePrecisionBeforeDownloading()
+    {
+        // The repository does not exist: a download attempt would fail with HttpRequestException instead.
+        var ex = await Assert.ThrowsAsync<ArgumentException>(() =>
+            InferenceRuntime.FromHuggingFaceAsync("irodori-tests/does-not-exist", codecPrecision: "tf32",
+                cancellationToken: TestContext.Current.CancellationToken));
+        Assert.Contains("codec_precision='tf32'", ex.Message);
+    }
+
+    [Fact]
     public void CodecRejectsTf32BeforeReadingAnyFile()
     {
         var ex = Assert.Throws<ArgumentException>(() => InferenceRuntime.Load(new RuntimeOptions

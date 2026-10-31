@@ -137,6 +137,8 @@ public sealed class DacVaeCodec : IDisposable
         }
 
         int hop = HopLength;
+        // Own scope: a cancelled decode frees the output buffer here even when the caller has no dispose scope.
+        using var outer = torch.NewDisposeScope();
         var output = torch.empty(new long[] { latent.shape[0], 1, frames * hop }, dtype: ScalarType.Float32);
         for (long start = 0; start < frames; start += chunk)
         {
@@ -150,7 +152,7 @@ public sealed class DacVaeCodec : IDisposable
             var keep = audio[TensorIndex.Ellipsis, TensorIndex.Slice((start - from) * hop, (end - from) * hop)];
             output[TensorIndex.Ellipsis, TensorIndex.Slice(start * hop, end * hop)] = keep.to(ScalarType.Float32).cpu();
         }
-        return output;
+        return output.MoveToOuterDisposeScope();
     }
 
     /// <summary>
