@@ -32,6 +32,10 @@ public sealed class FakeEngine : ISpeechEngine
     /// <summary>When set, the engine waits for it after the first streamed piece.</summary>
     public SemaphoreSlim? HoldAfterFirstPiece { get; set; }
 
+    /// <summary>Requests that stopped on <see cref="SamplingRequest.CancellationToken"/>.</summary>
+    public int Cancelled => Volatile.Read(ref _cancelled);
+    private int _cancelled;
+
     /// <summary>Requests passed to <see cref="PrepareReference"/>.</summary>
     public List<SamplingRequest> Prepared { get; } = new();
 
@@ -43,6 +47,11 @@ public sealed class FakeEngine : ISpeechEngine
     public SamplingResult Synthesize(SamplingRequest request)
     {
         lock (Requests) Requests.Add(request);
+        if (request.CancellationToken.IsCancellationRequested)
+        {
+            Interlocked.Increment(ref _cancelled);
+            request.CancellationToken.ThrowIfCancellationRequested();
+        }
         if (Throw is not null) throw Throw;
         var audio = new float[(int)(SampleRate * Seconds)];
         for (int i = 0; i < audio.Length; i++) audio[i] = 0.25f * MathF.Sin(2 * MathF.PI * 440 * i / SampleRate);

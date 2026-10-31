@@ -43,7 +43,8 @@ public class DacVaeChunkTests
         long maxSamples = 230L * codec.HopLength - 17;  // a trimmed tail that does not end on a frame
         var pieces = new List<(long Offset, float[] Samples)>();
 
-        var streamed = codec.DecodeStream(latent, maxSamples, firstChunkFrames: 25, onChunk: (o, s) => pieces.Add((o, s)));
+        var streamed = codec.DecodeStream(latent, maxSamples, firstChunkFrames: 25, onChunk: (o, s) => pieces.Add((o, s)),
+            cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.Equal(maxSamples, streamed.Length);
         Assert.Equal(streamed, pieces.SelectMany(p => p.Samples));

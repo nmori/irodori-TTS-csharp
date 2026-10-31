@@ -318,6 +318,7 @@ internal sealed class ArraySampler
 
             for (int step = 0; step < numSteps; step++)
             {
+                req.CancellationToken.ThrowIfCancellationRequested();
                 float t = schedule[step], tNext = schedule[step + 1];
                 bool useCfg = enabled.Count > 0 && req.CfgMinT <= t && t <= req.CfgMaxT;
                 float[] v;
@@ -377,13 +378,14 @@ internal sealed class ArraySampler
         return x;
     }
 
-    public float[] SampleMeanFlow(Conditions cond, int batch, int seqLen, int numSteps)
+    public float[] SampleMeanFlow(Conditions cond, int batch, int seqLen, int numSteps, CancellationToken cancellationToken = default)
     {
         int n = batch * seqLen * _cfg.PatchedLatentDim;
         var x = _normal(n);
         using var bound = Bind(cond);
         for (int step = 0; step < numSteps; step++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             float t = 1f - step / (float)numSteps;
             float tNext = 1f - (step + 1) / (float)numSteps;
             var v = Velocity(bound, x, seqLen, t, t - tNext);

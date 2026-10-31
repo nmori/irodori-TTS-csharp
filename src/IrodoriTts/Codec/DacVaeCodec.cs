@@ -156,7 +156,8 @@ public sealed class DacVaeCodec : IDisposable
     /// audio is handed to <paramref name="onChunk"/> (sample offset, samples) as soon as it is ready.
     /// </summary>
     /// <param name="firstChunkFrames">Size of the first pass (see <see cref="DecodePlan.Build"/>); 0 = <see cref="DecodeChunkFrames"/>.</param>
-    public float[] DecodeStream(Tensor latent, long maxSamples, int firstChunkFrames = 0, Action<long, float[]>? onChunk = null)
+    public float[] DecodeStream(Tensor latent, long maxSamples, int firstChunkFrames = 0, Action<long, float[]>? onChunk = null,
+        CancellationToken cancellationToken = default)
     {
         if (latent.dim() != 3 || latent.shape[0] != 1) throw new ArgumentException("Expected latent shape (1, T, D).");
         using var _ = torch.inference_mode();
@@ -167,6 +168,7 @@ public sealed class DacVaeCodec : IDisposable
         var plan = DecodePlan.Build(frames, (int)((total + hop - 1) / hop), DecodeChunkFrames, DecodeContextFrames, firstChunkFrames);
         foreach (var span in plan)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             using var scope = torch.NewDisposeScope();
             var z = latent[TensorIndex.Colon, TensorIndex.Slice(span.From, span.To)].transpose(1, 2).contiguous().to(Device).to(DType);
             var audio = _model.Decode(z)[0, 0].to(ScalarType.Float32).cpu();

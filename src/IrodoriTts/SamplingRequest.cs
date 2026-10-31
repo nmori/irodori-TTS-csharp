@@ -14,6 +14,12 @@ public sealed class SamplingRequest
     /// </summary>
     public Action<AudioChunk>? OnAudioChunk { get; set; }
 
+    /// <summary>
+    /// Stops the synthesis (OperationCanceledException) between sampling steps and decoder passes, e.g. when the
+    /// client has gone; a request still waiting for the runtime gives up as soon as it gets it.
+    /// </summary>
+    public CancellationToken CancellationToken { get; set; }
+
     /// <summary>A shallow copy (lists are shared), e.g. to synthesize the same settings for another piece of text.</summary>
     public SamplingRequest Clone() => (SamplingRequest)MemberwiseClone();
 

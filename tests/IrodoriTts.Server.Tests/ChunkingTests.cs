@@ -74,6 +74,43 @@ public class ChunkingTests
     }
 
     [Fact]
+    public async Task ClientThatDisconnectsStopsTheRemainingPieces()
+    {
+        await using var s = await TestServer.StartAsync(prepareVoices: Voices);
+        s.Engine.StreamPieces = 2;
+        using var hold = new SemaphoreSlim(0);
+        s.Engine.HoldAfterFirstPiece = hold;
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/v1/audio/speech")
+        {
+            Content = new StringContent(Speech(LongText).ToJsonString(), System.Text.Encoding.UTF8, "application/json"),
+        };
+
+        var r = await s.Client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, TestContext.Current.CancellationToken);
+        var stream = await r.Content.ReadAsStreamAsync(TestContext.Current.CancellationToken);
+        // The WAV header and the first streamed half of the first piece: the engine is now held.
+        int firstChunk = (int)(FakeEngine.SampleRate * s.Engine.Seconds) / 2 * 2;
+        await stream.ReadExactlyAsync(new byte[44 + firstChunk], TestContext.Current.CancellationToken);
+        // The client goes away: a read cancelled while it waits closes the connection.
+        using (var cut = new CancellationTokenSource())
+        {
+            var read = stream.ReadAsync(new byte[1 << 16], cut.Token).AsTask();
+            cut.Cancel();
+            await Assert.ThrowsAnyAsync<Exception>(() => read);
+        }
+        r.Dispose();
+        var aborted = s.Engine.Requests[0].CancellationToken;
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (!aborted.IsCancellationRequested && DateTime.UtcNow < deadline) await Task.Delay(20, TestContext.Current.CancellationToken);
+        Assert.True(aborted.IsCancellationRequested);
+        s.Engine.HoldAfterFirstPiece = null;
+        hold.Release();
+
+        while (s.Engine.Cancelled == 0 && DateTime.UtcNow < deadline) await Task.Delay(20, TestContext.Current.CancellationToken);
+        Assert.Equal(1, s.Engine.Cancelled);
+        Assert.Equal(2, s.Engine.Requests.Count);  // the first piece, then the second one gives up at once
+    }
+
+    [Fact]
     public async Task EngineThatDoesNotStreamGetsTheConcatenatedWav()
     {
         await using var s = await TestServer.StartAsync(prepareVoices: Voices);

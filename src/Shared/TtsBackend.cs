@@ -127,6 +127,15 @@ internal sealed class TtsBackend(
             hfCheckpoint = "Aratako/Irodori-TTS-v4.1-Small-MF";
             log("[backend] no GPU: using the MeanFlow checkpoint (4 steps). Pass --hf-checkpoint to override.");
         }
+        string precision = option("model-precision") ?? "fp32";
+        if (precision.Equals("auto", StringComparison.OrdinalIgnoreCase))
+        {
+            precision = modelDevice.StartsWith("cuda", StringComparison.OrdinalIgnoreCase) ? "bf16" : "fp32";
+        }
+        string codecPrecision = option("codec-precision") ?? "fp32";
+        // A precision the device cannot run fails now, not after the model download.
+        InferenceRuntime.ResolveDType(precision, TorchSharp.torch.device(modelDevice));
+        InferenceRuntime.ResolveCodecDType(codecPrecision, TorchSharp.torch.device(codecDevice));
         var progress = new Progress<(string File, long D, long? T)>(x => ReportDownload(x.File, x.D, x.T));
         string checkpoint = option("checkpoint")
             ?? await HuggingFaceHub.DownloadCheckpointAsync(hfCheckpoint ?? "Aratako/Irodori-TTS-v4.1-Small", progress);
@@ -136,11 +145,6 @@ internal sealed class TtsBackend(
                 progress: new Progress<(long D, long? T)>(x => ReportDownload("weights.pth", x.D, x.T)));
         Console.Error.WriteLine();
         log($"[load] checkpoint={checkpoint}");
-        string precision = option("model-precision") ?? "fp32";
-        if (precision.Equals("auto", StringComparison.OrdinalIgnoreCase))
-        {
-            precision = modelDevice.StartsWith("cuda", StringComparison.OrdinalIgnoreCase) ? "bf16" : "fp32";
-        }
         var runtime = InferenceRuntime.Load(new RuntimeOptions
         {
             Checkpoint = checkpoint,
@@ -149,7 +153,7 @@ internal sealed class TtsBackend(
             ModelDevice = modelDevice,
             ModelPrecision = precision,
             CodecDevice = codecDevice,
-            CodecPrecision = option("codec-precision") ?? "fp32",
+            CodecPrecision = codecPrecision,
         });
         log($"[load] done in {loadWatch.Elapsed.TotalSeconds:F1} s (model={modelDevice}, codec={codecDevice})");
         return new TtsBackend(runtime.Synthesize, runtime, $"torch ({modelDevice}, {precision})",
